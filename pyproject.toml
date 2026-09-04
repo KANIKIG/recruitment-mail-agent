@@ -1,0 +1,11 @@
+[project]
+name = "autumn-job-tracker"
+version = "0.1.0"
+description = "Sync recruitment emails from IMAP into a Lark Base"
+requires-python = ">=3.11"
+
+[project.scripts]
+autumn-tracker = "autumn_tracker.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

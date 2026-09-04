@@ -1,0 +1,13 @@
+{
+  "name": "autumn-job-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "IMAP 邮箱到飞书多维表格的招聘流程 Agent",
+  "scripts": {
+    "lark": "lark-cli",
+    "lark:status": "lark-cli auth status"
+  },
+  "dependencies": {
+    "@larksuite/cli": "^1.0.0"
+  }
+}
