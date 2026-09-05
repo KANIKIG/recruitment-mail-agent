@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
+from datetime import date
 import json
+from pathlib import Path
 import sqlite3
 
+from .coremail import TodoRequest
 from .models import Classification
 
 
@@ -30,6 +32,16 @@ class StateStore:
                 model TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS mail_todo (
+                message_id TEXT PRIMARY KEY,
+                subject TEXT NOT NULL,
+                sender_address TEXT NOT NULL,
+                received_at TEXT NOT NULL,
+                due_date TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                completed_at TEXT
+            );
             """
         )
 
@@ -41,6 +53,7 @@ class StateStore:
             self.connection.execute("DELETE FROM checkpoint")
             self.connection.execute("DELETE FROM processed_mail")
             self.connection.execute("DELETE FROM agent_cache")
+            self.connection.execute("DELETE FROM mail_todo")
 
     def get_last_uid(self) -> int | None:
         row = self.connection.execute(
@@ -88,3 +101,45 @@ class StateStore:
             (message_id, payload, model),
         )
         self.connection.commit()
+
+    def enqueue_todo(self, todo: TodoRequest) -> None:
+        self.connection.execute(
+            "INSERT INTO mail_todo(message_id, subject, sender_address, received_at, due_date) "
+            "VALUES(?, ?, ?, ?, ?) ON CONFLICT(message_id) DO UPDATE SET "
+            "subject=excluded.subject, sender_address=excluded.sender_address, "
+            "received_at=excluded.received_at, due_date=excluded.due_date, completed_at=NULL",
+            (
+                todo.message_id,
+                todo.subject,
+                todo.sender_address,
+                todo.received_at,
+                todo.due_date.isoformat(),
+            ),
+        )
+        self.connection.commit()
+
+    def pending_todos(self) -> list[TodoRequest]:
+        rows = self.connection.execute(
+            "SELECT message_id, subject, sender_address, received_at, due_date "
+            "FROM mail_todo WHERE completed_at IS NULL ORDER BY due_date, message_id"
+        ).fetchall()
+        return [TodoRequest(*row[:4], due_date=date.fromisoformat(row[4])) for row in rows]
+
+    def mark_todos_done(self, message_ids: set[str]) -> None:
+        if not message_ids:
+            return
+        with self.connection:
+            self.connection.executemany(
+                "UPDATE mail_todo SET completed_at=CURRENT_TIMESTAMP, last_error=NULL "
+                "WHERE message_id=?",
+                [(message_id,) for message_id in message_ids],
+            )
+
+    def mark_todos_failed(self, message_ids: set[str], error: str) -> None:
+        if not message_ids:
+            return
+        with self.connection:
+            self.connection.executemany(
+                "UPDATE mail_todo SET attempts=attempts+1, last_error=? WHERE message_id=?",
+                [(error[:500], message_id) for message_id in message_ids],
+            )

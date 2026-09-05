@@ -1,7 +1,7 @@
 [project]
 name = "autumn-job-tracker"
-version = "0.1.0"
-description = "Sync recruitment emails from IMAP into a Lark Base"
+version = "0.2.0"
+description = "Sync recruitment emails to Lark Base and create native Coremail deadline todos"
 requires-python = ">=3.11"
 
 [project.scripts]

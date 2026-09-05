@@ -13,6 +13,7 @@ import sys
 import time
 
 from .config import ROOT, Settings, load_dotenv
+from .coremail import CoremailTodoClient
 from .lark import LarkBase, STATUS_OPTIONS
 from .mailbox import ImapMailbox
 from .state import StateStore
@@ -189,6 +190,13 @@ def cmd_doctor(_: argparse.Namespace) -> int:
         except Exception as exc:
             print(f"[FAIL] IMAP 邮箱登录：{exc}")
             problems.append("确认已开启 IMAP，并使用客户端专用密码")
+        if settings.coremail_todo_enabled:
+            try:
+                CoremailTodoClient(settings).login()
+                print("[OK] Coremail 原生截止待办")
+            except Exception as exc:
+                print(f"[FAIL] Coremail 原生截止待办：{exc}")
+                problems.append("检查 COREMAIL_WEB_URL，且确认该密码也可登录网页邮箱")
     if settings.deepseek_api_key:
         print(f"[OK] DeepSeek Agent：{settings.deepseek_model}")
     else:

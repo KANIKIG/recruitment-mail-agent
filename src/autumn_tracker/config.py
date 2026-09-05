@@ -31,6 +31,9 @@ class Settings:
     imap_port: int
     imap_folder: str
     password_value: str | None
+    coremail_todo_enabled: bool
+    coremail_web_url: str
+    coremail_lookup_limit: int
     deepseek_api_key: str | None
     deepseek_base_url: str
     deepseek_model: str
@@ -57,6 +60,9 @@ class Settings:
             imap_port=int(os.getenv("IMAP_PORT", "993")),
             imap_folder=os.getenv("IMAP_FOLDER", "INBOX"),
             password_value=os.getenv("IMAP_PASSWORD") or None,
+            coremail_todo_enabled=os.getenv("COREMAIL_TODO_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
+            coremail_web_url=os.getenv("COREMAIL_WEB_URL", "").rstrip("/"),
+            coremail_lookup_limit=max(20, min(500, int(os.getenv("COREMAIL_LOOKUP_LIMIT", "200")))),
             deepseek_api_key=os.getenv("DEEPSEEK_API_KEY") or None,
             deepseek_base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/"),
             deepseek_model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
@@ -73,6 +79,8 @@ class Settings:
         )
         if require_targets and (not result.lark_base_token or not result.lark_table_id):
             raise ValueError("缺少 LARK_BASE_TOKEN/LARK_TABLE_ID；请先执行 ./tracker init-base")
+        if result.coremail_todo_enabled and not result.coremail_web_url:
+            raise ValueError("启用邮件待办时必须配置 COREMAIL_WEB_URL")
         return result
 
     def mail_password(self) -> str:

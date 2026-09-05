@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from .config import Settings
+from .coremail import CoremailTodoClient, TodoRequest
 from .deepseek_agent import DeepSeekMailAgent
 from .lark import LarkBase, LarkRecord
 from .mailbox import ImapMailbox
@@ -19,6 +21,7 @@ STATUS_RANK = {
 }
 TERMINAL = {"Offer", "已挂"}
 FOLLOWUP_STATUSES = {"测评&AI面", "笔试", "技术面", "HR面", "主管面", "Offer", "已挂"}
+TODO_STATUSES = {"测评&AI面", "笔试", "技术面", "HR面", "主管面"}
 
 
 def should_replace_status(current: str, incoming: str, locked: bool) -> bool:
@@ -97,6 +100,57 @@ def _fields(message: MailMessage, classification: Classification, tz: ZoneInfo) 
     return fields
 
 
+def _todo_request(
+    message: MailMessage,
+    classification: Classification,
+    tz: ZoneInfo,
+) -> TodoRequest | None:
+    if classification.status not in TODO_STATUSES or not classification.deadline:
+        return None
+    try:
+        due_at = datetime.fromisoformat(classification.deadline)
+    except ValueError:
+        return None
+    if due_at.tzinfo is None:
+        due_at = due_at.replace(tzinfo=tz)
+    due_date = due_at.astimezone(tz).date()
+    if due_date < datetime.now(tz).date():
+        return None
+    return TodoRequest(
+        message_id=message.message_id,
+        subject=message.subject,
+        sender_address=message.sender_address,
+        received_at=message.received_at.isoformat(),
+        due_date=due_date,
+    )
+
+
+def _sync_pending_todos(settings: Settings, state: StateStore) -> tuple[int, int]:
+    if not settings.coremail_todo_enabled:
+        return 0, 0
+    pending = state.pending_todos()
+    if not pending:
+        return 0, 0
+    today = datetime.now(ZoneInfo(settings.timezone)).date()
+    expired = {todo.message_id for todo in pending if todo.due_date < today}
+    if expired:
+        state.mark_todos_done(expired)
+    active = [todo for todo in pending if todo.message_id not in expired]
+    if not active:
+        return 0, 0
+    requested = {todo.message_id for todo in active}
+    try:
+        completed = CoremailTodoClient(settings).create_todos(active)
+        state.mark_todos_done(completed)
+        missing = requested - completed
+        state.mark_todos_failed(missing, "未在 Coremail 最近邮件中匹配到原邮件")
+        return len(completed), len(missing)
+    except Exception as exc:
+        state.mark_todos_failed(requested, str(exc))
+        print(json.dumps({"phase": "mail_todo", "error": str(exc)}, ensure_ascii=False), flush=True)
+        return 0, len(requested)
+
+
 def run_sync(
     settings: Settings,
     dry_run: bool = False,
@@ -105,7 +159,8 @@ def run_sync(
     state = StateStore(settings.database_path)
     stats = {
         "fetched": 0, "llm_batches": 0, "relevant": 0,
-        "created": 0, "updated": 0, "flagged": 0, "skipped": 0,
+        "created": 0, "updated": 0, "flagged": 0,
+        "todos_created": 0, "todos_pending": 0, "skipped": 0,
     }
     try:
         lark = LarkBase(settings.lark_cli, settings.lark_base_token, settings.lark_table_id)
@@ -192,11 +247,15 @@ def run_sync(
                     by_key[result.source_key] = created
                     by_company.setdefault(result.company.lower(), []).append(created)
             synced.append((message, result))
+            todo = _todo_request(message, result, timezone)
+            if todo:
+                state.enqueue_todo(todo)
 
         # 先成功写入飞书，再标记原邮件；任一步失败都不推进 UID 游标，方便重试。
         followup_uids = [message.uid for message, result in synced if result.status in FOLLOWUP_STATUSES]
         if not dry_run:
             stats["flagged"] = ImapMailbox(settings).mark_flagged(followup_uids)
+            stats["todos_created"], stats["todos_pending"] = _sync_pending_todos(settings, state)
             for message, result in synced:
                 state.mark_processed(message.message_id, message.uid, result.status)
 
