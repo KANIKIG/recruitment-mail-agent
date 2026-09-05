@@ -4,7 +4,7 @@ from dataclasses import replace
 
 from autumn_tracker.config import Settings
 from autumn_tracker.models import Classification, MailMessage
-from autumn_tracker.sync import _role_key, _todo_request, should_replace_status
+from autumn_tracker.sync import _fields, _role_key, _todo_request, should_replace_status
 
 
 class StatusPolicyTest(unittest.TestCase):
@@ -55,6 +55,28 @@ class StatusPolicyTest(unittest.TestCase):
         self.assertIsNone(_todo_request(message, no_deadline, timezone.utc))
         application = replace(result, status="投递")
         self.assertIsNone(_todo_request(message, application, timezone.utc))
+
+    def test_fields_include_company_type(self):
+        message = MailMessage(
+            uid=1,
+            message_id="m1",
+            subject="投递成功",
+            sender_name="招聘",
+            sender_address="jobs@example.com",
+            received_at=datetime(2026, 9, 5, tzinfo=timezone.utc),
+            body="",
+        )
+        result = Classification(
+            relevant=True,
+            company="示例公司",
+            role="算法工程师",
+            status="投递",
+            confidence=0.9,
+            reason="投递成功",
+            source_key="key",
+            company_type="民营企业",
+        )
+        self.assertEqual(_fields(message, result, timezone.utc)["企业类型"], "民营企业")
 
 
 if __name__ == "__main__":

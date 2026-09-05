@@ -20,9 +20,17 @@ STATUS_OPTIONS = [
     {"name": "已挂", "hue": "Red", "lightness": "Light"},
 ]
 
+ENTERPRISE_TYPE_OPTIONS = [
+    {"name": "民营企业", "hue": "Blue", "lightness": "Lighter"},
+    {"name": "央国企", "hue": "Red", "lightness": "Lighter"},
+    {"name": "事业单位", "hue": "Green", "lightness": "Lighter"},
+    {"name": "外企", "hue": "Purple", "lightness": "Lighter"},
+]
+
 FIELD_SPECS = [
     {"name": "公司名称", "type": "text"},
     {"name": "岗位名称", "type": "text"},
+    {"name": "企业类型", "type": "select", "options": ENTERPRISE_TYPE_OPTIONS},
     {"name": "流程状态", "type": "select", "options": STATUS_OPTIONS},
     {"name": "更新时间", "type": "datetime", "style": {"format": "yyyy/MM/dd HH:mm"}},
     {"name": "投递时间", "type": "datetime", "style": {"format": "yyyy/MM/dd HH:mm"}},
@@ -277,7 +285,7 @@ class LarkBase:
     @staticmethod
     def _typed_fields(fields: dict[str, Any]) -> dict[str, Any]:
         result = dict(fields)
-        for status_field in ("当前进展", "流程状态"):
-            if status_field in result and isinstance(result[status_field], str):
-                result[status_field] = [result[status_field]]
+        for select_field in ("当前进展", "流程状态", "企业类型"):
+            if select_field in result and isinstance(result[select_field], str):
+                result[select_field] = [result[select_field]]
         return result

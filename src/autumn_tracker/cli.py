@@ -14,7 +14,8 @@ import time
 
 from .config import ROOT, Settings, load_dotenv
 from .coremail import CoremailTodoClient
-from .lark import LarkBase, STATUS_OPTIONS
+from .deepseek_agent import DeepSeekMailAgent
+from .lark import ENTERPRISE_TYPE_OPTIONS, LarkBase, STATUS_OPTIONS
 from .mailbox import ImapMailbox
 from .state import StateStore
 from .sync import backfill_flagged_todos, run_sync
@@ -138,6 +139,8 @@ def cmd_simplify_table(_: argparse.Namespace) -> int:
         lark.create_fields([{"name": "投递时间", "type": "datetime", "style": {"format": "yyyy/MM/dd HH:mm"}}])
     if "截止时间" not in fields:
         lark.create_fields([{"name": "截止时间", "type": "datetime", "style": {"format": "yyyy/MM/dd HH:mm"}}])
+    if "企业类型" not in fields:
+        lark.create_fields([{"name": "企业类型", "type": "select", "options": ENTERPRISE_TYPE_OPTIONS}])
 
     # 刷新字段列表，保证重复执行时只删仍然存在的旧列。
     fields = {item["name"]: item for item in lark.list_fields() if item.get("name") and item.get("id")}
@@ -151,13 +154,53 @@ def cmd_simplify_table(_: argparse.Namespace) -> int:
             lark.delete_field(str(item["id"]))
             time.sleep(2)
     remaining = [str(item.get("name")) for item in lark.list_fields()]
-    expected = ["公司名称", "岗位名称", "流程状态", "更新时间", "投递时间", "截止时间"]
+    expected = ["公司名称", "岗位名称", "企业类型", "流程状态", "更新时间", "投递时间", "截止时间"]
     if set(remaining) != set(expected):
         raise RuntimeError(f"表格字段未完全精简，当前字段：{remaining}")
     for view in lark.list_views():
         if view.get("id") and view.get("type") in {"grid", "kanban"}:
             lark.set_view_sort(str(view["id"]), "更新时间", descending=True)
-    print(f"表格已精简为 6 列，保留并迁移 {len(records)} 行。")
+    print(f"表格已精简为 7 列，保留并迁移 {len(records)} 行。")
+    return 0
+
+
+def cmd_backfill_company_types(_: argparse.Namespace) -> int:
+    settings = Settings.from_env(require_targets=True, require_mail=False)
+    lark = LarkBase(settings.lark_cli, settings.lark_base_token, settings.lark_table_id)
+    fields = {item.get("name"): item for item in lark.list_fields() if item.get("name")}
+    definition = {
+        "name": "企业类型",
+        "type": "select",
+        "multiple": False,
+        "options": ENTERPRISE_TYPE_OPTIONS,
+    }
+    existing_field = fields.get("企业类型")
+    if existing_field and existing_field.get("id"):
+        lark.update_field(str(existing_field["id"]), definition)
+    else:
+        lark.create_fields([definition])
+
+    records = lark.list_records()
+    pending: list[tuple[str, str]] = []
+    for record in records:
+        company = _cell_text(record.fields.get("公司名称") or record.fields.get("公司")).strip()
+        current_type = _cell_text(record.fields.get("企业类型")).strip()
+        if company and company != "待确认公司" and not current_type:
+            pending.append((record.record_id, company))
+
+    companies = list(dict.fromkeys(company for _, company in pending))
+    company_types = DeepSeekMailAgent(settings).classify_company_types(companies)
+    updates = {
+        record_id: {"企业类型": company_types[company]}
+        for record_id, company in pending
+    }
+    lark.batch_update_records(updates)
+    print(json.dumps({
+        "records": len(records),
+        "companies_classified": len(companies),
+        "records_updated": len(updates),
+        "records_skipped": len(records) - len(updates),
+    }, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -390,8 +433,10 @@ def build_parser() -> argparse.ArgumentParser:
     init_base.set_defaults(handler=cmd_init_base)
     init_views = subparsers.add_parser("init-views", help="为现有主表补建默认视图")
     init_views.set_defaults(handler=cmd_init_views)
-    simplify = subparsers.add_parser("simplify-table", help="迁移并精简为六列表格")
+    simplify = subparsers.add_parser("simplify-table", help="迁移并精简为七列表格")
     simplify.set_defaults(handler=cmd_simplify_table)
+    company_types = subparsers.add_parser("backfill-company-types", help="新增企业类型列并补齐现有记录")
+    company_types.set_defaults(handler=cmd_backfill_company_types)
     sync = subparsers.add_parser("sync", help="执行一次增量同步")
     sync.add_argument("--dry-run", action="store_true", help="只分类并显示动作，不写飞书或本地游标")
     sync.set_defaults(handler=cmd_sync)

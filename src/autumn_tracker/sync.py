@@ -95,6 +95,8 @@ def _fields(message: MailMessage, classification: Classification, tz: ZoneInfo) 
         "更新时间": received,
         **({"投递时间": received} if classification.status == "投递" else {}),
     }
+    if classification.company_type:
+        fields["企业类型"] = classification.company_type
     if classification.deadline:
         fields["截止时间"] = classification.deadline
     return fields
@@ -276,6 +278,8 @@ def run_sync(
                 current_status = _cell_text(record.fields.get("流程状态") or record.fields.get("当前进展")) or "待确认"
                 # 保留人工维护值，但允许后续正文把“待确认岗位”补全为明确岗位。
                 fields.pop("公司名称", None)
+                if record.fields.get("企业类型"):
+                    fields.pop("企业类型", None)
                 existing_role = _cell_text(record.fields.get("岗位名称") or record.fields.get("岗位"))
                 if existing_role != "待确认岗位" or result.role == "待确认岗位":
                     fields.pop("岗位名称", None)

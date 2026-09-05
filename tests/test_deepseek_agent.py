@@ -36,11 +36,22 @@ class DeepSeekAgentTest(unittest.TestCase):
         )
 
     def test_structured_result_and_deadline(self):
-        response = {"choices": [{"message": {"content": """{"items":[{"index":0,"is_recruitment":true,"company_name":"示例公司","job_name":"算法工程师","process_status":"测评&AI面","deadline":"2026-09-08T18:00:00+08:00","confidence":0.96,"evidence":"测评通知"}]}"""}}]}
+        response = {"choices": [{"message": {"content": """{"items":[{"index":0,"is_recruitment":true,"company_name":"示例公司","job_name":"算法工程师","enterprise_type":"央国企","process_status":"测评&AI面","deadline":"2026-09-08T18:00:00+08:00","confidence":0.96,"evidence":"测评通知"}]}"""}}]}
         result = StubAgent(self.settings(), response).classify_batch([self.message()])["m1"]
         self.assertTrue(result.relevant)
         self.assertEqual(result.status, "测评&AI面")
         self.assertEqual(result.deadline, "2026-09-08T18:00+08:00")
+        self.assertEqual(result.company_type, "央国企")
+
+    def test_company_type_batch_is_strict(self):
+        response = {"choices": [{"message": {"content": """{"items":[{"index":0,"enterprise_type":"民营企业"},{"index":1,"enterprise_type":"外企"}]}"""}}]}
+        result = StubAgent(self.settings(), response).classify_company_types(["甲公司", "乙公司"])
+        self.assertEqual(result, {"甲公司": "民营企业", "乙公司": "外企"})
+
+    def test_invalid_company_type_is_not_written(self):
+        response = {"choices": [{"message": {"content": """{"items":[{"index":0,"is_recruitment":true,"company_name":"示例公司","job_name":"算法工程师","enterprise_type":"未知类型","process_status":"投递","deadline":null,"confidence":0.9,"evidence":"投递成功"}]}"""}}]}
+        result = StubAgent(self.settings(), response).classify_batch([self.message()])["m1"]
+        self.assertIsNone(result.company_type)
 
     def test_unknown_status_is_downgraded(self):
         response = {"choices": [{"message": {"content": """{"items":[{"index":0,"is_recruitment":true,"company_name":"示例公司","job_name":"算法工程师","process_status":"三面","deadline":null,"confidence":2,"evidence":"通知"}]}"""}}]}

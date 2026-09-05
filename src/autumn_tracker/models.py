@@ -25,3 +25,4 @@ class Classification:
     reason: str
     source_key: str
     deadline: str | None = None
+    company_type: str | None = None
