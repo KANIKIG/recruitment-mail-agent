@@ -27,14 +27,24 @@ ENTERPRISE_TYPE_OPTIONS = [
     {"name": "外企", "hue": "Purple", "lightness": "Lighter"},
 ]
 
+FIELD_ORDER = [
+    "公司名称",
+    "岗位名称",
+    "流程状态",
+    "企业类型",
+    "截止时间",
+    "更新时间",
+    "投递时间",
+]
+
 FIELD_SPECS = [
     {"name": "公司名称", "type": "text"},
     {"name": "岗位名称", "type": "text"},
-    {"name": "企业类型", "type": "select", "options": ENTERPRISE_TYPE_OPTIONS},
     {"name": "流程状态", "type": "select", "options": STATUS_OPTIONS},
+    {"name": "企业类型", "type": "select", "options": ENTERPRISE_TYPE_OPTIONS},
+    {"name": "截止时间", "type": "datetime", "style": {"format": "yyyy/MM/dd HH:mm"}},
     {"name": "更新时间", "type": "datetime", "style": {"format": "yyyy/MM/dd HH:mm"}},
     {"name": "投递时间", "type": "datetime", "style": {"format": "yyyy/MM/dd HH:mm"}},
-    {"name": "截止时间", "type": "datetime", "style": {"format": "yyyy/MM/dd HH:mm"}}
 ]
 
 
@@ -138,6 +148,8 @@ class LarkBase:
         for view in views:
             if isinstance(view, dict) and view.get("id") and view.get("type") in {"grid", "kanban"}:
                 self.set_view_sort(str(view["id"]), "更新时间", descending=True)
+            if isinstance(view, dict) and view.get("id") and view.get("type") == "grid":
+                self.set_view_visible_fields(str(view["id"]), FIELD_ORDER)
 
     def list_views(self) -> list[dict[str, Any]]:
         app_token, table_id = self._require_target()
@@ -192,6 +204,15 @@ class LarkBase:
             "base", "+view-set-sort", "--base-token", app_token, "--table-id", table_id,
             "--view-id", view_id,
             "--json", json.dumps({"sort_config": [{"field": field, "desc": descending}]}, ensure_ascii=False),
+            "--as", "user", "--format", "json",
+        ])
+
+    def set_view_visible_fields(self, view_id: str, fields: list[str]) -> None:
+        app_token, table_id = self._require_target()
+        self._run_command([
+            "base", "+view-set-visible-fields", "--base-token", app_token, "--table-id", table_id,
+            "--view-id", view_id,
+            "--json", json.dumps({"visible_fields": fields}, ensure_ascii=False),
             "--as", "user", "--format", "json",
         ])
 
