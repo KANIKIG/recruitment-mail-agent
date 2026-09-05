@@ -17,7 +17,7 @@ from .coremail import CoremailTodoClient
 from .lark import LarkBase, STATUS_OPTIONS
 from .mailbox import ImapMailbox
 from .state import StateStore
-from .sync import run_sync
+from .sync import backfill_flagged_todos, run_sync
 
 
 LEGACY_STATUS_MAP = {
@@ -247,6 +247,15 @@ def cmd_sync(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_backfill_todos(args: argparse.Namespace) -> int:
+    settings = Settings.from_env(require_targets=False)
+    if not settings.coremail_todo_enabled:
+        raise ValueError("请先启用 COREMAIL_TODO_ENABLED")
+    stats = backfill_flagged_todos(settings, dry_run=args.dry_run)
+    print(json.dumps(stats, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_rebuild(args: argparse.Namespace) -> int:
     if not args.yes:
         raise ValueError("重建会删除飞书现有记录和本地游标；确认后请加 --yes")
@@ -386,6 +395,9 @@ def build_parser() -> argparse.ArgumentParser:
     sync = subparsers.add_parser("sync", help="执行一次增量同步")
     sync.add_argument("--dry-run", action="store_true", help="只分类并显示动作，不写飞书或本地游标")
     sync.set_defaults(handler=cmd_sync)
+    backfill_todos = subparsers.add_parser("backfill-todos", help="为起始日期后的已标记邮件补建截止待办")
+    backfill_todos.add_argument("--dry-run", action="store_true", help="只统计候选邮件，不创建邮箱待办")
+    backfill_todos.set_defaults(handler=cmd_backfill_todos)
     rebuild = subparsers.add_parser("rebuild", help="清空记录并从起始日期重新识别")
     rebuild.add_argument("--yes", action="store_true", help="确认删除当前飞书记录和本地同步状态")
     rebuild.set_defaults(handler=cmd_rebuild)

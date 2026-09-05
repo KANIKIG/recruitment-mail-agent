@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import date
 import unittest
 from unittest.mock import patch
 
@@ -34,6 +35,7 @@ class MailboxFlagTest(unittest.TestCase):
             Settings.from_env(require_targets=False, require_mail=False),
             email="user@example.com",
             password_value="test-password",
+            since_date=date(2026, 8, 20),
         )
 
     @patch("autumn_tracker.mailbox.imaplib.IMAP4_SSL", FakeIMAP)
@@ -51,6 +53,15 @@ class MailboxFlagTest(unittest.TestCase):
         FakeIMAP.instances.clear()
         self.assertEqual(ImapMailbox(self.settings()).mark_flagged([]), 0)
         self.assertEqual(FakeIMAP.instances, [])
+
+    @patch("autumn_tracker.mailbox.imaplib.IMAP4_SSL", FakeIMAP)
+    def test_flagged_backfill_is_limited_by_start_date(self):
+        FakeIMAP.instances.clear()
+        self.assertEqual(ImapMailbox(self.settings()).fetch_flagged(), [])
+        self.assertIn(
+            ("uid", "search", None, "(FLAGGED SINCE 20-Aug-2026)"),
+            FakeIMAP.instances[0].calls,
+        )
 
 
 if __name__ == "__main__":

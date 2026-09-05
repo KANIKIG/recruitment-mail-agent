@@ -107,7 +107,13 @@ class StateStore:
             "INSERT INTO mail_todo(message_id, subject, sender_address, received_at, due_date) "
             "VALUES(?, ?, ?, ?, ?) ON CONFLICT(message_id) DO UPDATE SET "
             "subject=excluded.subject, sender_address=excluded.sender_address, "
-            "received_at=excluded.received_at, due_date=excluded.due_date, completed_at=NULL",
+            "received_at=excluded.received_at, due_date=excluded.due_date, "
+            "completed_at=CASE WHEN mail_todo.due_date=excluded.due_date "
+            "THEN mail_todo.completed_at ELSE NULL END, "
+            "attempts=CASE WHEN mail_todo.due_date=excluded.due_date "
+            "THEN mail_todo.attempts ELSE 0 END, "
+            "last_error=CASE WHEN mail_todo.due_date=excluded.due_date "
+            "THEN mail_todo.last_error ELSE NULL END",
             (
                 todo.message_id,
                 todo.subject,

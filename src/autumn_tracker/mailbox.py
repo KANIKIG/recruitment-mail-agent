@@ -73,6 +73,24 @@ class ImapMailbox:
                 pass
 
     def fetch(self, after_uid: int | None = None) -> tuple[list[MailMessage], int | None]:
+        criterion = (
+            f"UID {after_uid + 1}:*"
+            if after_uid
+            else f'SINCE {self.settings.since_date.strftime("%d-%b-%Y")}'
+        )
+        return self._fetch_matching(criterion, after_uid)
+
+    def fetch_flagged(self) -> list[MailMessage]:
+        """读取起始日期后的已标记邮件，用于一次性补建截止待办。"""
+        criterion = f'(FLAGGED SINCE {self.settings.since_date.strftime("%d-%b-%Y")})'
+        messages, _ = self._fetch_matching(criterion)
+        return messages
+
+    def _fetch_matching(
+        self,
+        criterion: str,
+        after_uid: int | None = None,
+    ) -> tuple[list[MailMessage], int | None]:
         since = datetime.combine(
             self.settings.since_date,
             datetime.min.time(),
@@ -88,8 +106,7 @@ class ImapMailbox:
             status, _ = client.select(self.settings.imap_folder, readonly=True)
             if status != "OK":
                 raise RuntimeError(f"无法只读打开邮箱目录 {self.settings.imap_folder}")
-            criterion = f"UID {after_uid + 1}:*" if after_uid else f'SINCE {self.settings.since_date.strftime("%d-%b-%Y")} '
-            status, data = client.uid("search", None, criterion.strip())
+            status, data = client.uid("search", None, criterion)
             if status != "OK":
                 raise RuntimeError("IMAP 搜索失败")
             uids = [int(item) for item in (data[0] or b"").split()]

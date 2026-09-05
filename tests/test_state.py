@@ -38,6 +38,12 @@ class TodoQueueTest(unittest.TestCase):
         self.store.mark_todos_done({"m1"})
         self.assertEqual(self.store.pending_todos(), [])
 
+    def test_reenqueue_same_deadline_is_idempotent(self):
+        self.store.enqueue_todo(self.todo)
+        self.store.mark_todos_done({"m1"})
+        self.store.enqueue_todo(self.todo)
+        self.assertEqual(self.store.pending_todos(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

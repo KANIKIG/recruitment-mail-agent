@@ -151,6 +151,67 @@ def _sync_pending_todos(settings: Settings, state: StateStore) -> tuple[int, int
         return 0, len(requested)
 
 
+def backfill_flagged_todos(settings: Settings, dry_run: bool = False) -> dict[str, int]:
+    """为起始日期后的已标记邮件补建待办，不改变增量 UID 游标或飞书数据。"""
+    state = StateStore(settings.database_path)
+    stats = {
+        "flagged_fetched": 0,
+        "cached": 0,
+        "llm_batches": 0,
+        "eligible": 0,
+        "todos_created": 0,
+        "todos_pending": 0,
+        "skipped": 0,
+    }
+    try:
+        messages = ImapMailbox(settings).fetch_flagged()
+        stats["flagged_fetched"] = len(messages)
+        agent = DeepSeekMailAgent(settings)
+        timezone = ZoneInfo(settings.timezone)
+        results: dict[str, Classification] = {}
+        needs_agent: list[MailMessage] = []
+
+        for message in messages:
+            cached = state.get_agent_result(message.message_id, settings.deepseek_model)
+            if cached:
+                results[message.message_id] = cached
+                stats["cached"] += 1
+            else:
+                needs_agent.append(message)
+
+        for offset in range(0, len(needs_agent), settings.deepseek_batch_size):
+            batch = needs_agent[offset : offset + settings.deepseek_batch_size]
+            batch_results = agent.classify_batch(batch)
+            stats["llm_batches"] += 1
+            results.update(batch_results)
+            if not dry_run:
+                for message in batch:
+                    state.save_agent_result(
+                        message.message_id,
+                        settings.deepseek_model,
+                        batch_results[message.message_id],
+                    )
+
+        for message in messages:
+            result = results[message.message_id]
+            if not result.relevant or result.confidence < settings.min_confidence:
+                stats["skipped"] += 1
+                continue
+            todo = _todo_request(message, result, timezone)
+            if not todo:
+                stats["skipped"] += 1
+                continue
+            stats["eligible"] += 1
+            if not dry_run:
+                state.enqueue_todo(todo)
+
+        if not dry_run:
+            stats["todos_created"], stats["todos_pending"] = _sync_pending_todos(settings, state)
+        return stats
+    finally:
+        state.close()
+
+
 def run_sync(
     settings: Settings,
     dry_run: bool = False,
