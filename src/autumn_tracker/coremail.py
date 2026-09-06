@@ -4,8 +4,10 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from email.utils import parseaddr
 from http.cookiejar import CookieJar
+from urllib.error import HTTPError, URLError
 import json
 import re
+import time
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import HTTPCookieProcessor, Request, build_opener
@@ -62,8 +64,20 @@ class CoremailTodoClient:
         self.sid: str | None = None
 
     def _request(self, request: Request) -> tuple[str, str]:
-        with self.opener.open(request, timeout=30) as response:
-            return response.read().decode("utf-8", errors="replace"), response.geturl()
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                with self.opener.open(request, timeout=30) as response:
+                    return response.read().decode("utf-8", errors="replace"), response.geturl()
+            except HTTPError as exc:
+                last_error = exc
+                if exc.code < 500 and exc.code != 429:
+                    raise
+            except (URLError, TimeoutError, ConnectionError, OSError) as exc:
+                last_error = exc
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+        raise RuntimeError(f"Coremail 网络请求失败：{last_error}")
 
     def login(self) -> None:
         user_agent = (
@@ -137,7 +151,7 @@ class CoremailTodoClient:
             headers={
                 "Accept": "text/x-json",
                 "Content-Type": f'text/x-json; tz="{self.settings.timezone}"',
-                "User-Agent": "RecruitmentMailAgent/0.3",
+                "User-Agent": "RecruitmentMailAgent/0.3.1",
             },
         ))
         return self._decode_response(raw)
@@ -151,7 +165,7 @@ class CoremailTodoClient:
             headers={
                 "Accept": "text/x-json",
                 "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "User-Agent": "RecruitmentMailAgent/0.3",
+                "User-Agent": "RecruitmentMailAgent/0.3.1",
             },
         ))
         return self._decode_response(raw)

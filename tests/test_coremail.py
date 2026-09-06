@@ -1,6 +1,9 @@
 from dataclasses import replace
 from datetime import date
 import unittest
+from unittest.mock import patch
+from urllib.error import URLError
+from urllib.request import Request
 
 from autumn_tracker.config import Settings
 from autumn_tracker.coremail import CoremailTodoClient, TodoRequest
@@ -60,6 +63,38 @@ class CoremailTodoTest(unittest.TestCase):
         ]
         match = CoremailTodoClient._find_message(messages, self.todo())
         self.assertEqual(match["id"], "right")
+
+    def test_transient_network_error_is_retried(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b"ok"
+
+            def geturl(self):
+                return "https://mail.example.com/ok"
+
+        class Opener:
+            def __init__(self):
+                self.calls = 0
+
+            def open(self, request, timeout):
+                self.calls += 1
+                if self.calls < 3:
+                    raise URLError("temporary EOF")
+                return Response()
+
+        opener = Opener()
+        client = StubCoremail([])
+        client.opener = opener
+        with patch("autumn_tracker.coremail.time.sleep"):
+            body, url = client._request(Request("https://mail.example.com"))
+        self.assertEqual((body, url), ("ok", "https://mail.example.com/ok"))
+        self.assertEqual(opener.calls, 3)
 
 
 if __name__ == "__main__":

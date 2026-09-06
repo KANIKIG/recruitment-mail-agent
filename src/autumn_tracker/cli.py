@@ -311,7 +311,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
 
 def cmd_backfill_todos(args: argparse.Namespace) -> int:
-    settings = Settings.from_env(require_targets=False)
+    settings = Settings.from_env(require_targets=True)
     if not settings.coremail_todo_enabled:
         raise ValueError("请先启用 COREMAIL_TODO_ENABLED")
     stats = backfill_flagged_todos(settings, dry_run=args.dry_run)

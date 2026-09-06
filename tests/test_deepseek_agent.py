@@ -4,7 +4,7 @@ import unittest
 
 from autumn_tracker.config import Settings
 from autumn_tracker.deepseek_agent import DeepSeekMailAgent
-from autumn_tracker.models import MailMessage
+from autumn_tracker.models import Classification, MailMessage
 
 
 class StubAgent(DeepSeekMailAgent):
@@ -92,6 +92,36 @@ class DeepSeekAgentTest(unittest.TestCase):
         response = {"choices": [{"message": {"content": """{"items":[{"index":0,"is_recruitment":true,"company_name":"汇川技术","job_name":"算法工程师","process_status":"待确认","deadline":"2026-09-08T18:00:00+08:00","confidence":0.9,"evidence":"更新简历"}]}"""}}]}
         result = StubAgent(self.settings(), response).classify_batch([self.message()])["m1"]
         self.assertIsNone(result.deadline)
+
+    def test_relative_hours_are_repaired_from_received_time(self):
+        message = self.message()
+        message = replace(message, body="请务必认真作答，并在72小时内完成。")
+        classification = Classification(
+            relevant=True,
+            company="示例公司",
+            role="算法工程师",
+            status="测评&AI面",
+            confidence=0.9,
+            reason="测评邀请",
+            source_key="key",
+        )
+        repaired = DeepSeekMailAgent(self.settings()).repair_missing_deadline(message, classification)
+        self.assertEqual(repaired.deadline, "2026-09-08T08:00+08:00")
+
+    def test_link_validity_days_are_repaired(self):
+        message = self.message()
+        message = replace(message, body="首次进入后开始考试，链接有效期 7天。")
+        classification = Classification(
+            relevant=True,
+            company="示例公司",
+            role="算法工程师",
+            status="测评&AI面",
+            confidence=0.9,
+            reason="AI 面试邀请",
+            source_key="key",
+        )
+        repaired = DeepSeekMailAgent(self.settings()).repair_missing_deadline(message, classification)
+        self.assertEqual(repaired.deadline, "2026-09-12T08:00+08:00")
 
 
 if __name__ == "__main__":

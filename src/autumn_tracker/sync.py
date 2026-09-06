@@ -159,10 +159,12 @@ def backfill_flagged_todos(settings: Settings, dry_run: bool = False) -> dict[st
     stats = {
         "flagged_fetched": 0,
         "cached": 0,
+        "deadline_repaired": 0,
         "llm_batches": 0,
         "eligible": 0,
         "todos_created": 0,
         "todos_pending": 0,
+        "table_deadlines_updated": 0,
         "skipped": 0,
     }
     try:
@@ -170,14 +172,22 @@ def backfill_flagged_todos(settings: Settings, dry_run: bool = False) -> dict[st
         stats["flagged_fetched"] = len(messages)
         agent = DeepSeekMailAgent(settings)
         timezone = ZoneInfo(settings.timezone)
+        lark = LarkBase(settings.lark_cli, settings.lark_base_token, settings.lark_table_id)
+        records = lark.list_records()
+        by_key, by_company = _record_index(records)
         results: dict[str, Classification] = {}
         needs_agent: list[MailMessage] = []
 
         for message in messages:
             cached = state.get_agent_result(message.message_id, settings.deepseek_model)
             if cached:
-                results[message.message_id] = cached
+                repaired = agent.repair_missing_deadline(message, cached)
+                results[message.message_id] = repaired
                 stats["cached"] += 1
+                if repaired != cached:
+                    stats["deadline_repaired"] += 1
+                    if not dry_run:
+                        state.save_agent_result(message.message_id, settings.deepseek_model, repaired)
             else:
                 needs_agent.append(message)
 
@@ -194,6 +204,7 @@ def backfill_flagged_todos(settings: Settings, dry_run: bool = False) -> dict[st
                         batch_results[message.message_id],
                     )
 
+        table_updates: dict[str, dict[str, Any]] = {}
         for message in messages:
             result = results[message.message_id]
             if not result.relevant or result.confidence < settings.min_confidence:
@@ -206,8 +217,13 @@ def backfill_flagged_todos(settings: Settings, dry_run: bool = False) -> dict[st
             stats["eligible"] += 1
             if not dry_run:
                 state.enqueue_todo(todo)
+                record = _find_record(result, by_key, by_company)
+                if record and not record.fields.get("截止时间"):
+                    table_updates[record.record_id] = {"截止时间": result.deadline}
 
         if not dry_run:
+            lark.batch_update_records(table_updates)
+            stats["table_deadlines_updated"] = len(table_updates)
             stats["todos_created"], stats["todos_pending"] = _sync_pending_todos(settings, state)
         return stats
     finally:

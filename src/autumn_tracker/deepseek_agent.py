@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
+from dataclasses import replace
+from datetime import datetime, timedelta
 import hashlib
 import json
+import re
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -50,6 +52,10 @@ PERSONAL_PROCESS_SUBJECT_HINTS = (
 )
 NON_APPLICATION_SUBJECT_HINTS = ("投递失败", "提交失败")
 DEADLINE_STATUSES = {"测评&AI面", "笔试", "技术面", "HR面", "主管面"}
+RELATIVE_DEADLINE_PATTERNS = (
+    re.compile(r"在\s*(\d{1,3})\s*(小时|天)\s*内(?:完成|作答|参加)"),
+    re.compile(r"(?:链接|测评|考试)?有效期(?:为|是|[:：])?\s*(\d{1,3})\s*(小时|天)"),
+)
 COMPANY_ALIASES = {
     "小鹏": "小鹏汽车",
     "小鹏集团": "小鹏汽车",
@@ -143,6 +149,8 @@ class DeepSeekMailAgent:
             except (TypeError, ValueError):
                 confidence = 0.5
             deadline = self._normalize_deadline(item.get("deadline")) if status in DEADLINE_STATUSES else None
+            if status in DEADLINE_STATUSES and not deadline:
+                deadline = self._relative_deadline(message)
             company_type = str(item.get("enterprise_type") or "").strip()
             if company_type not in ALLOWED_COMPANY_TYPES:
                 company_type = None
@@ -159,6 +167,32 @@ class DeepSeekMailAgent:
                 company_type=company_type,
             )
         return results
+
+    def repair_missing_deadline(
+        self,
+        message: MailMessage,
+        classification: Classification,
+    ) -> Classification:
+        """用可审计规则修复模型漏掉的明确相对期限。"""
+        if classification.deadline or classification.status not in DEADLINE_STATUSES:
+            return classification
+        deadline = self._relative_deadline(message)
+        return replace(classification, deadline=deadline) if deadline else classification
+
+    def _relative_deadline(self, message: MailMessage) -> str | None:
+        text = f"{message.subject}\n{message.body[:4000]}"
+        durations: list[timedelta] = []
+        for pattern in RELATIVE_DEADLINE_PATTERNS:
+            for amount_text, unit in pattern.findall(text):
+                amount = int(amount_text)
+                if unit == "小时" and 0 < amount <= 24 * 30:
+                    durations.append(timedelta(hours=amount))
+                elif unit == "天" and 0 < amount <= 90:
+                    durations.append(timedelta(days=amount))
+        if not durations:
+            return None
+        received = message.received_at.astimezone(self.timezone)
+        return (received + min(durations)).isoformat(timespec="minutes")
 
     def classify_company_types(self, companies: list[str]) -> dict[str, str]:
         unique_companies = list(dict.fromkeys(company.strip() for company in companies if company.strip()))
