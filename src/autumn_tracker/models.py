@@ -26,3 +26,7 @@ class Classification:
     source_key: str
     deadline: str | None = None
     company_type: str | None = None
+    interview_start: str | None = None
+    interview_end: str | None = None
+    meeting_link: str | None = None
+    interview_location: str | None = None

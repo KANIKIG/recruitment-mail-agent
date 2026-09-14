@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sqlite3
 
+from .calendar import CalendarEventRequest
 from .coremail import TodoRequest
 from .models import Classification
 
@@ -42,6 +43,19 @@ class StateStore:
                 last_error TEXT,
                 completed_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS calendar_event (
+                event_key TEXT PRIMARY KEY,
+                source_message_id TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                start_at TEXT NOT NULL,
+                end_at TEXT NOT NULL,
+                description TEXT NOT NULL,
+                location TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                event_id TEXT,
+                completed_at TEXT
+            );
             """
         )
 
@@ -54,6 +68,7 @@ class StateStore:
             self.connection.execute("DELETE FROM processed_mail")
             self.connection.execute("DELETE FROM agent_cache")
             self.connection.execute("DELETE FROM mail_todo")
+            self.connection.execute("DELETE FROM calendar_event")
 
     def get_last_uid(self) -> int | None:
         row = self.connection.execute(
@@ -148,4 +163,49 @@ class StateStore:
             self.connection.executemany(
                 "UPDATE mail_todo SET attempts=attempts+1, last_error=? WHERE message_id=?",
                 [(error[:500], message_id) for message_id in message_ids],
+            )
+
+    def enqueue_calendar_event(self, event: CalendarEventRequest) -> None:
+        self.connection.execute(
+            "INSERT INTO calendar_event(event_key, source_message_id, summary, start_at, end_at, description, location) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?) ON CONFLICT(event_key) DO UPDATE SET "
+            "source_message_id=excluded.source_message_id, summary=excluded.summary, "
+            "start_at=excluded.start_at, end_at=excluded.end_at, "
+            "description=excluded.description, location=excluded.location",
+            (
+                event.event_key,
+                event.source_message_id,
+                event.summary,
+                event.start_at,
+                event.end_at,
+                event.description,
+                event.location,
+            ),
+        )
+        self.connection.commit()
+
+    def pending_calendar_events(self) -> list[CalendarEventRequest]:
+        rows = self.connection.execute(
+            "SELECT event_key, source_message_id, summary, start_at, end_at, description, location "
+            "FROM calendar_event WHERE completed_at IS NULL ORDER BY start_at, event_key"
+        ).fetchall()
+        return [CalendarEventRequest(*row) for row in rows]
+
+    def mark_calendar_events_done(self, event_ids: dict[str, str]) -> None:
+        if not event_ids:
+            return
+        with self.connection:
+            self.connection.executemany(
+                "UPDATE calendar_event SET event_id=?, completed_at=CURRENT_TIMESTAMP, last_error=NULL "
+                "WHERE event_key=?",
+                [(event_id, event_key) for event_key, event_id in event_ids.items()],
+            )
+
+    def mark_calendar_events_failed(self, event_keys: set[str], error: str) -> None:
+        if not event_keys:
+            return
+        with self.connection:
+            self.connection.executemany(
+                "UPDATE calendar_event SET attempts=attempts+1, last_error=? WHERE event_key=?",
+                [(error[:500], event_key) for event_key in event_keys],
             )

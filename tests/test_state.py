@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from autumn_tracker.coremail import TodoRequest
+from autumn_tracker.calendar import CalendarEventRequest
 from autumn_tracker.state import StateStore
 
 
@@ -43,6 +44,21 @@ class TodoQueueTest(unittest.TestCase):
         self.store.mark_todos_done({"m1"})
         self.store.enqueue_todo(self.todo)
         self.assertEqual(self.store.pending_todos(), [])
+
+    def test_calendar_event_queue_is_idempotent(self):
+        event = CalendarEventRequest(
+            event_key="event-key",
+            source_message_id="m1",
+            summary="技术面｜示例公司｜算法工程师",
+            start_at="2099-09-20T14:00+08:00",
+            end_at="2099-09-20T15:00+08:00",
+            description="自动创建",
+        )
+        self.store.enqueue_calendar_event(event)
+        self.assertEqual(self.store.pending_calendar_events(), [event])
+        self.store.mark_calendar_events_done({"event-key": "event-id"})
+        self.store.enqueue_calendar_event(event)
+        self.assertEqual(self.store.pending_calendar_events(), [])
 
 
 if __name__ == "__main__":

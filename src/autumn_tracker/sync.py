@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
+import hashlib
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from .config import Settings
+from .calendar import CalendarEventRequest, LarkCalendar
 from .coremail import CoremailTodoClient, TodoRequest
 from .deepseek_agent import DeepSeekMailAgent
 from .lark import LarkBase, LarkRecord
@@ -16,12 +18,14 @@ from .state import StateStore
 
 
 STATUS_RANK = {
-    "待确认": 0, "投递": 10, "测评&AI面": 20, "笔试": 25, "技术面": 30,
+    "待确认": 0, "投递": 10, "测评&AI面": 20, "笔试": 25, "约面": 28, "技术面": 30,
     "HR面": 40, "主管面": 50, "Offer": 60,
 }
 TERMINAL = {"Offer", "已挂"}
-FOLLOWUP_STATUSES = {"测评&AI面", "笔试", "技术面", "HR面", "主管面", "Offer", "已挂"}
-TODO_STATUSES = {"测评&AI面", "笔试", "技术面", "HR面", "主管面"}
+FOLLOWUP_STATUSES = {"测评&AI面", "笔试", "约面", "技术面", "HR面", "主管面", "Offer", "已挂"}
+TODO_STATUSES = {"测评&AI面", "笔试", "约面", "技术面", "HR面", "主管面"}
+CALENDAR_STATUSES = {"技术面", "HR面", "主管面"}
+INTERVIEW_REVIEW_STATUSES = CALENDAR_STATUSES | {"约面"}
 
 
 def should_replace_status(current: str, incoming: str, locked: bool) -> bool:
@@ -29,6 +33,8 @@ def should_replace_status(current: str, incoming: str, locked: bool) -> bool:
         return False
     if incoming == "已挂":
         return True
+    if incoming == "约面":
+        return current != "约面"
     return STATUS_RANK.get(incoming, 0) > STATUS_RANK.get(current, 0)
 
 
@@ -127,6 +133,62 @@ def _todo_request(
     )
 
 
+def _calendar_event_request(
+    message: MailMessage,
+    classification: Classification,
+    tz: ZoneInfo,
+) -> CalendarEventRequest | None:
+    if classification.status not in CALENDAR_STATUSES or not classification.interview_start:
+        return None
+    try:
+        start = datetime.fromisoformat(classification.interview_start)
+    except ValueError:
+        return None
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=tz)
+    start = start.astimezone(tz)
+    try:
+        end = datetime.fromisoformat(classification.interview_end) if classification.interview_end else None
+    except ValueError:
+        end = None
+    if end and end.tzinfo is None:
+        end = end.replace(tzinfo=tz)
+    if end:
+        end = end.astimezone(tz)
+    if not end or end <= start:
+        end = start + timedelta(hours=1)
+    if end <= datetime.now(tz):
+        return None
+
+    def clean(value: str) -> str:
+        return re.sub(r"[\r\n]+", " ", value).strip()[:300]
+
+    summary = f"{classification.status}｜{clean(classification.company)}｜{clean(classification.role)}"
+    description = [
+        "由招聘邮件 Agent 自动创建。",
+        f"- 公司：{clean(classification.company)}",
+        f"- 岗位：{clean(classification.role)}",
+        f"- 流程：{classification.status}",
+        f"- 邮件主题：{clean(message.subject)}",
+    ]
+    if classification.meeting_link:
+        description.append(f"- 面试入口：{classification.meeting_link}")
+    if classification.interview_location:
+        description.append(f"- 面试地点：{clean(classification.interview_location)}")
+    event_key = hashlib.sha256(
+        f"{classification.source_key}|{classification.status}|{start.isoformat()}".encode("utf-8")
+    ).hexdigest()[:32]
+    return CalendarEventRequest(
+        event_key=event_key,
+        source_message_id=message.message_id,
+        summary=summary,
+        start_at=start.isoformat(timespec="minutes"),
+        end_at=end.isoformat(timespec="minutes"),
+        description="\n".join(description),
+        location=classification.interview_location,
+    )
+
+
 def _sync_pending_todos(settings: Settings, state: StateStore) -> tuple[int, int]:
     if not settings.coremail_todo_enabled:
         return 0, 0
@@ -153,6 +215,36 @@ def _sync_pending_todos(settings: Settings, state: StateStore) -> tuple[int, int
         return 0, len(requested)
 
 
+def _sync_pending_calendar_events(settings: Settings, state: StateStore) -> tuple[int, int]:
+    if not settings.lark_calendar_enabled:
+        return 0, 0
+    pending = state.pending_calendar_events()
+    if not pending:
+        return 0, 0
+    now = datetime.now(ZoneInfo(settings.timezone))
+    expired = {
+        event.event_key
+        for event in pending
+        if datetime.fromisoformat(event.end_at).astimezone(now.tzinfo) <= now
+    }
+    if expired:
+        state.mark_calendar_events_done({event_key: "expired" for event_key in expired})
+    active = [event for event in pending if event.event_key not in expired]
+    if not active:
+        return 0, 0
+    requested = {event.event_key for event in active}
+    try:
+        created = LarkCalendar(settings).create_events(active)
+        state.mark_calendar_events_done(created)
+        missing = requested - set(created)
+        state.mark_calendar_events_failed(missing, "飞书日历未返回 event_id")
+        return len(created), len(missing)
+    except Exception as exc:
+        state.mark_calendar_events_failed(requested, str(exc))
+        print(json.dumps({"phase": "calendar_event", "error": str(exc)}, ensure_ascii=False), flush=True)
+        return 0, len(requested)
+
+
 def backfill_flagged_todos(settings: Settings, dry_run: bool = False) -> dict[str, int]:
     """为起始日期后的已标记邮件补建待办，不改变增量 UID 游标或飞书数据。"""
     state = StateStore(settings.database_path)
@@ -165,6 +257,8 @@ def backfill_flagged_todos(settings: Settings, dry_run: bool = False) -> dict[st
         "todos_created": 0,
         "todos_pending": 0,
         "table_deadlines_updated": 0,
+        "calendar_created": 0,
+        "calendar_pending": 0,
         "skipped": 0,
     }
     try:
@@ -225,6 +319,105 @@ def backfill_flagged_todos(settings: Settings, dry_run: bool = False) -> dict[st
             lark.batch_update_records(table_updates)
             stats["table_deadlines_updated"] = len(table_updates)
             stats["todos_created"], stats["todos_pending"] = _sync_pending_todos(settings, state)
+            stats["calendar_created"], stats["calendar_pending"] = _sync_pending_calendar_events(settings, state)
+        return stats
+    finally:
+        state.close()
+
+
+def repair_flagged_interviews(settings: Settings, dry_run: bool = False) -> dict[str, int]:
+    """重新识别星标面试邮件，修正约面状态并补建已确认面试日程。"""
+    state = StateStore(settings.database_path)
+    stats = {
+        "flagged_fetched": 0,
+        "interview_candidates": 0,
+        "llm_batches": 0,
+        "table_records_updated": 0,
+        "todos_created": 0,
+        "todos_pending": 0,
+        "calendar_eligible": 0,
+        "calendar_created": 0,
+        "calendar_pending": 0,
+    }
+    try:
+        messages = ImapMailbox(settings).fetch_flagged()
+        stats["flagged_fetched"] = len(messages)
+        candidates: list[MailMessage] = []
+        for message in messages:
+            cached = state.get_agent_result(message.message_id, settings.deepseek_model)
+            subject = message.subject.lower()
+            if (
+                (cached and cached.status in INTERVIEW_REVIEW_STATUSES)
+                or any(hint in subject for hint in ("面试", "约面", "预约", "interview"))
+            ):
+                candidates.append(message)
+        stats["interview_candidates"] = len(candidates)
+
+        agent = DeepSeekMailAgent(settings)
+        results: dict[str, Classification] = {}
+        for offset in range(0, len(candidates), settings.deepseek_batch_size):
+            batch = candidates[offset : offset + settings.deepseek_batch_size]
+            batch_results = agent.classify_batch(batch)
+            stats["llm_batches"] += 1
+            results.update(batch_results)
+            if not dry_run:
+                for message in batch:
+                    state.save_agent_result(
+                        message.message_id,
+                        settings.deepseek_model,
+                        batch_results[message.message_id],
+                    )
+
+        lark = LarkBase(settings.lark_cli, settings.lark_base_token, settings.lark_table_id)
+        records = lark.list_records()
+        by_key, by_company = _record_index(records)
+        latest_by_record: dict[str, tuple[MailMessage, Classification, LarkRecord]] = {}
+        for message in candidates:
+            result = results[message.message_id]
+            if not result.relevant or result.confidence < settings.min_confidence:
+                continue
+            record = _find_record(result, by_key, by_company)
+            if record:
+                latest_by_record[record.record_id] = (message, result, record)
+
+        table_updates: dict[str, dict[str, Any]] = {}
+        timezone = ZoneInfo(settings.timezone)
+        for record_id, (message, result, record) in latest_by_record.items():
+            current = _cell_text(record.fields.get("流程状态")) or "待确认"
+            if current in TERMINAL:
+                continue
+            patch: dict[str, Any] = {}
+            subject_and_body = f"{message.subject}\n{message.body[:4000]}".lower()
+            force_ai_correction = (
+                result.status == "测评&AI面"
+                and re.search(r"ai\s*面|ai面试", subject_and_body) is not None
+            )
+            if result.status == "约面" or force_ai_correction:
+                patch["流程状态"] = result.status
+                patch["截止时间"] = result.deadline
+            elif result.status in CALENDAR_STATUSES and (
+                current == "约面" or should_replace_status(current, result.status, False)
+            ):
+                patch["流程状态"] = result.status
+            if result.status in CALENDAR_STATUSES and result.interview_start:
+                patch["截止时间"] = result.interview_start
+
+            if patch:
+                table_updates[record_id] = patch
+            todo = _todo_request(message, result, timezone)
+            if todo and not dry_run:
+                state.enqueue_todo(todo)
+            calendar_event = _calendar_event_request(message, result, timezone)
+            if calendar_event:
+                stats["calendar_eligible"] += 1
+                if not dry_run:
+                    state.enqueue_calendar_event(calendar_event)
+
+        if not dry_run:
+            lark.batch_update_records(table_updates)
+            stats["table_records_updated"] = len(table_updates)
+            stats["todos_created"], stats["todos_pending"] = _sync_pending_todos(settings, state)
+            stats["calendar_created"], stats["calendar_pending"] = _sync_pending_calendar_events(settings, state)
         return stats
     finally:
         state.close()
@@ -239,7 +432,8 @@ def run_sync(
     stats = {
         "fetched": 0, "llm_batches": 0, "relevant": 0,
         "created": 0, "updated": 0, "flagged": 0,
-        "todos_created": 0, "todos_pending": 0, "skipped": 0,
+        "todos_created": 0, "todos_pending": 0,
+        "calendar_created": 0, "calendar_pending": 0, "skipped": 0,
     }
     try:
         lark = LarkBase(settings.lark_cli, settings.lark_base_token, settings.lark_table_id)
@@ -313,6 +507,7 @@ def run_sync(
                 "deadline": result.deadline,
                 "confidence": result.confidence,
                 "flag_email": result.status in FOLLOWUP_STATUSES,
+                "create_calendar": bool(_calendar_event_request(message, result, timezone)),
             }, ensure_ascii=False))
             if dry_run:
                 continue
@@ -331,12 +526,16 @@ def run_sync(
             todo = _todo_request(message, result, timezone)
             if todo:
                 state.enqueue_todo(todo)
+            calendar_event = _calendar_event_request(message, result, timezone)
+            if calendar_event:
+                state.enqueue_calendar_event(calendar_event)
 
         # 先成功写入飞书，再标记原邮件；任一步失败都不推进 UID 游标，方便重试。
         followup_uids = [message.uid for message, result in synced if result.status in FOLLOWUP_STATUSES]
         if not dry_run:
             stats["flagged"] = ImapMailbox(settings).mark_flagged(followup_uids)
             stats["todos_created"], stats["todos_pending"] = _sync_pending_todos(settings, state)
+            stats["calendar_created"], stats["calendar_pending"] = _sync_pending_calendar_events(settings, state)
             for message, result in synced:
                 state.mark_processed(message.message_id, message.uid, result.status)
 

@@ -4,7 +4,13 @@ from dataclasses import replace
 
 from autumn_tracker.config import Settings
 from autumn_tracker.models import Classification, MailMessage
-from autumn_tracker.sync import _fields, _role_key, _todo_request, should_replace_status
+from autumn_tracker.sync import (
+    _calendar_event_request,
+    _fields,
+    _role_key,
+    _todo_request,
+    should_replace_status,
+)
 
 
 class StatusPolicyTest(unittest.TestCase):
@@ -16,6 +22,9 @@ class StatusPolicyTest(unittest.TestCase):
 
     def test_written_exam_is_separate_stage(self):
         self.assertTrue(should_replace_status("测评&AI面", "笔试", False))
+
+    def test_self_scheduling_becomes_actionable_status(self):
+        self.assertTrue(should_replace_status("技术面", "约面", False))
 
     def test_role_key_ignores_campus_recruitment_prefix(self):
         self.assertIn(
@@ -77,6 +86,32 @@ class StatusPolicyTest(unittest.TestCase):
             company_type="民营企业",
         )
         self.assertEqual(_fields(message, result, timezone.utc)["企业类型"], "民营企业")
+
+    def test_only_confirmed_human_interview_creates_calendar_event(self):
+        message = MailMessage(
+            uid=1,
+            message_id="m1",
+            subject="面试时间确认",
+            sender_name="招聘",
+            sender_address="jobs@example.com",
+            received_at=datetime(2026, 9, 5, tzinfo=timezone.utc),
+            body="",
+        )
+        result = Classification(
+            relevant=True,
+            company="示例公司",
+            role="算法工程师",
+            status="技术面",
+            confidence=0.9,
+            reason="已确认面试时间",
+            source_key="key",
+            interview_start="2099-09-20T14:00:00+08:00",
+        )
+        event = _calendar_event_request(message, result, timezone.utc)
+        self.assertIsNotNone(event)
+        self.assertEqual(event.end_at, "2099-09-20T07:00+00:00")
+        self.assertIsNone(_calendar_event_request(message, replace(result, status="约面"), timezone.utc))
+        self.assertIsNone(_calendar_event_request(message, replace(result, status="测评&AI面"), timezone.utc))
 
 
 if __name__ == "__main__":

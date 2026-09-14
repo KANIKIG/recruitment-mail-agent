@@ -41,6 +41,7 @@ class Settings:
     lark_base_token: str | None
     lark_table_id: str | None
     lark_cli: str
+    lark_calendar_enabled: bool
     since_date: date
     sync_interval_seconds: int
     max_messages: int
@@ -70,6 +71,7 @@ class Settings:
             lark_base_token=os.getenv("LARK_BASE_TOKEN") or os.getenv("LARK_APP_TOKEN") or None,
             lark_table_id=os.getenv("LARK_TABLE_ID") or None,
             lark_cli=os.getenv("LARK_CLI", "./node_modules/.bin/lark-cli"),
+            lark_calendar_enabled=os.getenv("LARK_CALENDAR_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
             since_date=date.fromisoformat(os.getenv("SYNC_SINCE_DATE", "2026-08-20")),
             sync_interval_seconds=max(60, int(os.getenv("SYNC_INTERVAL_SECONDS", "300"))),
             max_messages=int(os.getenv("SYNC_MAX_MESSAGES", "300")),

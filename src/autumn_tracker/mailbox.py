@@ -25,6 +25,11 @@ def _decode(value: str | None) -> str:
 
 def _strip_html(value: str) -> str:
     value = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", value)
+    value = re.sub(
+        r'''(?is)<a\b[^>]*?href=["'](https?://[^"']+)["'][^>]*>(.*?)</a>''',
+        lambda match: f"{re.sub(r'<[^>]+>', ' ', match.group(2))} {match.group(1)}",
+        value,
+    )
     value = re.sub(r"(?s)<[^>]+>", " ", value)
     value = value.replace("&nbsp;", " ").replace("&amp;", "&")
     return re.sub(r"\s+", " ", value).strip()
@@ -33,20 +38,32 @@ def _strip_html(value: str) -> str:
 def _message_body(message: Message) -> str:
     plain: list[str] = []
     html: list[str] = []
+    calendar: list[str] = []
     parts = message.walk() if message.is_multipart() else [message]
     for part in parts:
         if part.get_content_disposition() == "attachment":
             continue
         content_type = part.get_content_type()
-        if content_type not in {"text/plain", "text/html"}:
+        if content_type not in {"text/plain", "text/html", "text/calendar"}:
             continue
         try:
             content = part.get_content()
         except (LookupError, UnicodeError):
             payload = part.get_payload(decode=True) or b""
             content = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
-        (plain if content_type == "text/plain" else html).append(str(content))
-    body = "\n".join(plain) if plain else _strip_html("\n".join(html))
+        if content_type == "text/calendar":
+            calendar.append(str(content))
+        elif content_type == "text/html":
+            html.append(str(content))
+        else:
+            plain.append(str(content))
+
+    # HTML 中通常才有真实 href；优先使用清洗后的 HTML，确保会议入口不会
+    # 因纯文本替代件只保留“点击进入”而丢失。ICS 放在最前面，避免 4,000 字符
+    # 的 Agent 输入上限截掉 DTSTART/DTEND/LOCATION 等关键字段。
+    content_body = _strip_html("\n".join(html)) if html else "\n".join(plain)
+    sections = (["[日历邀请]\n" + "\n".join(calendar)] if calendar else []) + [content_body]
+    body = "\n".join(section for section in sections if section)
     return re.sub(r"\s+", " ", body).strip()[:30000]
 
 

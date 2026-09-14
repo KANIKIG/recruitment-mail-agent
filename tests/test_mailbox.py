@@ -1,10 +1,12 @@
 from dataclasses import replace
 from datetime import date
+from email import policy
+from email.parser import BytesParser
 import unittest
 from unittest.mock import patch
 
 from autumn_tracker.config import Settings
-from autumn_tracker.mailbox import ImapMailbox
+from autumn_tracker.mailbox import ImapMailbox, _message_body
 
 
 class FakeIMAP:
@@ -62,6 +64,42 @@ class MailboxFlagTest(unittest.TestCase):
             ("uid", "search", None, "(FLAGGED SINCE 20-Aug-2026)"),
             FakeIMAP.instances[0].calls,
         )
+
+    def test_html_and_calendar_preserve_invite_time_and_real_link(self):
+        raw = b"""MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary=outer
+
+--outer
+Content-Type: multipart/alternative; boundary=inner
+
+--inner
+Content-Type: text/plain; charset=utf-8
+
+Please join the interview.
+--inner
+Content-Type: text/html; charset=utf-8
+
+<p>Please <a href=\"https://meeting.example/join/abc\">join</a>.</p>
+--inner--
+--outer
+Content-Type: text/calendar; charset=utf-8
+
+BEGIN:VCALENDAR
+BEGIN:VEVENT
+DTSTART:20260920T060000Z
+DTEND:20260920T070000Z
+LOCATION:Room 3
+END:VEVENT
+END:VCALENDAR
+--outer--
+"""
+        message = BytesParser(policy=policy.default).parsebytes(raw)
+
+        body = _message_body(message)
+
+        self.assertLess(body.index("DTSTART"), body.index("Please"))
+        self.assertIn("https://meeting.example/join/abc", body)
+        self.assertIn("LOCATION:Room 3", body)
 
 
 if __name__ == "__main__":

@@ -53,6 +53,27 @@ class DeepSeekAgentTest(unittest.TestCase):
         result = StubAgent(self.settings(), response).classify_batch([self.message()])["m1"]
         self.assertIsNone(result.company_type)
 
+    def test_self_scheduling_cannot_become_confirmed_interview(self):
+        response = {"choices": [{"message": {"content": """{"items":[{"index":0,"is_recruitment":true,"company_name":"示例公司","job_name":"算法工程师","enterprise_type":"民营企业","process_status":"约面","deadline":"2026-09-18T18:00:00+08:00","interview_start":"2026-09-20T14:00:00+08:00","interview_end":"2026-09-20T15:00:00+08:00","meeting_link":"https://example.com/booking","interview_location":null,"confidence":0.98,"evidence":"请自行选择面试时间"}]}"""}}]}
+        result = StubAgent(self.settings(), response).classify_batch([self.message()])["m1"]
+        self.assertEqual(result.status, "约面")
+        self.assertEqual(result.deadline, "2026-09-18T18:00+08:00")
+        self.assertIsNone(result.interview_start)
+        self.assertIsNone(result.meeting_link)
+
+    def test_ai_interview_cannot_become_calendar_interview(self):
+        response = {"choices": [{"message": {"content": """{"items":[{"index":0,"is_recruitment":true,"company_name":"示例公司","job_name":"算法工程师","enterprise_type":"民营企业","process_status":"测评&AI面","deadline":"2026-09-18T18:00:00+08:00","interview_start":"2026-09-18T18:00:00+08:00","interview_end":null,"meeting_link":"https://example.com/ai","interview_location":null,"confidence":0.98,"evidence":"AI面试"}]}"""}}]}
+        result = StubAgent(self.settings(), response).classify_batch([self.message()])["m1"]
+        self.assertEqual(result.status, "测评&AI面")
+        self.assertIsNone(result.interview_start)
+
+    def test_confirmed_interview_keeps_calendar_fields(self):
+        response = {"choices": [{"message": {"content": """{"items":[{"index":0,"is_recruitment":true,"company_name":"示例公司","job_name":"算法工程师","enterprise_type":"民营企业","process_status":"技术面","deadline":null,"interview_start":"2099-09-20T14:00:00+08:00","interview_end":"2099-09-20T14:45:00+08:00","meeting_link":"https://meeting.example.com/join","interview_location":null,"confidence":0.98,"evidence":"面试时间已确认"}]}"""}}]}
+        result = StubAgent(self.settings(), response).classify_batch([self.message()])["m1"]
+        self.assertEqual(result.interview_start, "2099-09-20T14:00+08:00")
+        self.assertEqual(result.interview_end, "2099-09-20T14:45+08:00")
+        self.assertEqual(result.deadline, result.interview_start)
+
     def test_unknown_status_is_downgraded(self):
         response = {"choices": [{"message": {"content": """{"items":[{"index":0,"is_recruitment":true,"company_name":"示例公司","job_name":"算法工程师","process_status":"三面","deadline":null,"confidence":2,"evidence":"通知"}]}"""}}]}
         result = StubAgent(self.settings(), response).classify_batch([self.message()])["m1"]

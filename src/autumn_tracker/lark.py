@@ -13,6 +13,7 @@ STATUS_OPTIONS = [
     {"name": "投递", "hue": "Blue", "lightness": "Lighter"},
     {"name": "测评&AI面", "hue": "Wathet", "lightness": "Light"},
     {"name": "笔试", "hue": "Purple", "lightness": "Lighter"},
+    {"name": "约面", "hue": "Yellow", "lightness": "Lighter"},
     {"name": "技术面", "hue": "Orange", "lightness": "Light"},
     {"name": "HR面", "hue": "Turquoise", "lightness": "Light"},
     {"name": "主管面", "hue": "Carmine", "lightness": "Light"},

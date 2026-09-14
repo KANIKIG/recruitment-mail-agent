@@ -151,7 +151,7 @@ class CoremailTodoClient:
             headers={
                 "Accept": "text/x-json",
                 "Content-Type": f'text/x-json; tz="{self.settings.timezone}"',
-                "User-Agent": "RecruitmentMailAgent/0.3.1",
+                "User-Agent": "RecruitmentMailAgent/0.4.0",
             },
         ))
         return self._decode_response(raw)
@@ -165,7 +165,7 @@ class CoremailTodoClient:
             headers={
                 "Accept": "text/x-json",
                 "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "User-Agent": "RecruitmentMailAgent/0.3.1",
+                "User-Agent": "RecruitmentMailAgent/0.4.0",
             },
         ))
         return self._decode_response(raw)

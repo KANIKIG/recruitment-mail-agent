@@ -13,18 +13,19 @@ import sys
 import time
 
 from .config import ROOT, Settings, load_dotenv
+from .calendar import LarkCalendar
 from .coremail import CoremailTodoClient
 from .deepseek_agent import DeepSeekMailAgent
 from .lark import ENTERPRISE_TYPE_OPTIONS, FIELD_ORDER, LarkBase, STATUS_OPTIONS
 from .mailbox import ImapMailbox
 from .state import StateStore
-from .sync import backfill_flagged_todos, run_sync
+from .sync import backfill_flagged_todos, repair_flagged_interviews, run_sync
 
 
 LEGACY_STATUS_MAP = {
     "已投递": "投递",
     "测评": "测评&AI面",
-    "笔试": "测评&AI面",
+    "笔试": "笔试",
     "面试": "技术面",
     "一面": "技术面",
     "二面": "技术面",
@@ -280,6 +281,13 @@ def cmd_doctor(_: argparse.Namespace) -> int:
             problems.append("检查飞书授权或表格 ID")
     else:
         print("[WAIT] 智能表格 ID")
+    if cli_exists and settings.lark_calendar_enabled:
+        try:
+            LarkCalendar(settings).check_connection()
+            print("[OK] 飞书主日历")
+        except Exception as exc:
+            print(f"[FAIL] 飞书主日历：{exc}")
+            problems.append("补充飞书日历读写授权")
     if problems:
         print("\n待处理：")
         for problem in problems:
@@ -315,6 +323,27 @@ def cmd_backfill_todos(args: argparse.Namespace) -> int:
     if not settings.coremail_todo_enabled:
         raise ValueError("请先启用 COREMAIL_TODO_ENABLED")
     stats = backfill_flagged_todos(settings, dry_run=args.dry_run)
+    print(json.dumps(stats, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_repair_interviews(args: argparse.Namespace) -> int:
+    settings = Settings.from_env(require_targets=True)
+    if not settings.lark_calendar_enabled:
+        raise ValueError("请先在 .env 中启用 LARK_CALENDAR_ENABLED=true")
+    lark = LarkBase(settings.lark_cli, settings.lark_base_token, settings.lark_table_id)
+    fields = {item.get("name"): item for item in lark.list_fields() if item.get("name")}
+    status_field = fields.get("流程状态") or fields.get("当前进展")
+    if not status_field or not status_field.get("id"):
+        raise RuntimeError("飞书表格缺少流程状态字段")
+    if not args.dry_run:
+        lark.update_field(str(status_field["id"]), {
+            "name": "流程状态",
+            "type": "select",
+            "multiple": False,
+            "options": STATUS_OPTIONS,
+        })
+    stats = repair_flagged_interviews(settings, dry_run=args.dry_run)
     print(json.dumps(stats, ensure_ascii=False, indent=2))
     return 0
 
@@ -465,6 +494,12 @@ def build_parser() -> argparse.ArgumentParser:
     backfill_todos = subparsers.add_parser("backfill-todos", help="为起始日期后的已标记邮件补建截止待办")
     backfill_todos.add_argument("--dry-run", action="store_true", help="只统计候选邮件，不创建邮箱待办")
     backfill_todos.set_defaults(handler=cmd_backfill_todos)
+    repair_interviews = subparsers.add_parser(
+        "repair-interviews",
+        help="重识别星标面试邮件并补建已确认面试日程",
+    )
+    repair_interviews.add_argument("--dry-run", action="store_true", help="只重新识别并统计，不写表格、待办或日历")
+    repair_interviews.set_defaults(handler=cmd_repair_interviews)
     rebuild = subparsers.add_parser("rebuild", help="清空记录并从起始日期重新识别")
     rebuild.add_argument("--yes", action="store_true", help="确认删除当前飞书记录和本地同步状态")
     rebuild.set_defaults(handler=cmd_rebuild)
