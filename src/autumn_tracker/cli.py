@@ -496,10 +496,16 @@ def build_parser() -> argparse.ArgumentParser:
     backfill_todos.set_defaults(handler=cmd_backfill_todos)
     repair_interviews = subparsers.add_parser(
         "repair-interviews",
-        help="重识别星标面试邮件并补建已确认面试日程",
+        help="兼容命令：重识别星标笔试/面试邮件并补建日程",
     )
     repair_interviews.add_argument("--dry-run", action="store_true", help="只重新识别并统计，不写表格、待办或日历")
     repair_interviews.set_defaults(handler=cmd_repair_interviews)
+    repair_calendar = subparsers.add_parser(
+        "repair-calendar",
+        help="重识别星标笔试/面试邮件并补建日程",
+    )
+    repair_calendar.add_argument("--dry-run", action="store_true", help="只重新识别并统计，不写表格、待办或日历")
+    repair_calendar.set_defaults(handler=cmd_repair_interviews)
     rebuild = subparsers.add_parser("rebuild", help="清空记录并从起始日期重新识别")
     rebuild.add_argument("--yes", action="store_true", help="确认删除当前飞书记录和本地同步状态")
     rebuild.set_defaults(handler=cmd_rebuild)

@@ -30,3 +30,5 @@ class Classification:
     interview_end: str | None = None
     meeting_link: str | None = None
     interview_location: str | None = None
+    written_exam_start: str | None = None
+    written_exam_end: str | None = None

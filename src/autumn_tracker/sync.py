@@ -24,8 +24,9 @@ STATUS_RANK = {
 TERMINAL = {"Offer", "已挂"}
 FOLLOWUP_STATUSES = {"测评&AI面", "笔试", "约面", "技术面", "HR面", "主管面", "Offer", "已挂"}
 TODO_STATUSES = {"测评&AI面", "笔试", "约面", "技术面", "HR面", "主管面"}
-CALENDAR_STATUSES = {"技术面", "HR面", "主管面"}
-INTERVIEW_REVIEW_STATUSES = CALENDAR_STATUSES | {"约面"}
+HUMAN_INTERVIEW_STATUSES = {"技术面", "HR面", "主管面"}
+CALENDAR_STATUSES = HUMAN_INTERVIEW_STATUSES | {"笔试"}
+CALENDAR_REVIEW_STATUSES = CALENDAR_STATUSES | {"约面"}
 
 
 def should_replace_status(current: str, incoming: str, locked: bool) -> bool:
@@ -138,17 +139,33 @@ def _calendar_event_request(
     classification: Classification,
     tz: ZoneInfo,
 ) -> CalendarEventRequest | None:
-    if classification.status not in CALENDAR_STATUSES or not classification.interview_start:
+    if classification.status not in CALENDAR_STATUSES:
+        return None
+    fixed_written_exam = classification.status == "笔试" and bool(classification.written_exam_start)
+    deadline_written_exam = classification.status == "笔试" and not fixed_written_exam
+    if fixed_written_exam:
+        start_text = classification.written_exam_start
+        end_text = classification.written_exam_end
+        event_label = "笔试"
+    elif deadline_written_exam:
+        start_text = classification.deadline
+        end_text = None
+        event_label = "笔试截止"
+    else:
+        start_text = classification.interview_start
+        end_text = classification.interview_end
+        event_label = classification.status
+    if not start_text:
         return None
     try:
-        start = datetime.fromisoformat(classification.interview_start)
+        start = datetime.fromisoformat(start_text)
     except ValueError:
         return None
     if start.tzinfo is None:
         start = start.replace(tzinfo=tz)
     start = start.astimezone(tz)
     try:
-        end = datetime.fromisoformat(classification.interview_end) if classification.interview_end else None
+        end = datetime.fromisoformat(end_text) if end_text else None
     except ValueError:
         end = None
     if end and end.tzinfo is None:
@@ -156,14 +173,14 @@ def _calendar_event_request(
     if end:
         end = end.astimezone(tz)
     if not end or end <= start:
-        end = start + timedelta(hours=1)
-    if end <= datetime.now(tz):
+        end = start + (timedelta(minutes=30) if deadline_written_exam else timedelta(hours=1))
+    if start <= datetime.now(tz):
         return None
 
     def clean(value: str) -> str:
         return re.sub(r"[\r\n]+", " ", value).strip()[:300]
 
-    summary = f"{classification.status}｜{clean(classification.company)}｜{clean(classification.role)}"
+    summary = f"{event_label}｜{clean(classification.company)}｜{clean(classification.role)}"
     description = [
         "由招聘邮件 Agent 自动创建。",
         f"- 公司：{clean(classification.company)}",
@@ -171,12 +188,14 @@ def _calendar_event_request(
         f"- 流程：{classification.status}",
         f"- 邮件主题：{clean(message.subject)}",
     ]
+    if deadline_written_exam:
+        description.append("- 时间依据：邮件给出的最晚完成时间（非固定开考时刻）")
     if classification.meeting_link:
         description.append(f"- 面试入口：{classification.meeting_link}")
     if classification.interview_location:
         description.append(f"- 面试地点：{clean(classification.interview_location)}")
     event_key = hashlib.sha256(
-        f"{classification.source_key}|{classification.status}|{start.isoformat()}".encode("utf-8")
+        f"{classification.source_key}|{event_label}|{start.isoformat()}".encode("utf-8")
     ).hexdigest()[:32]
     return CalendarEventRequest(
         event_key=event_key,
@@ -326,11 +345,11 @@ def backfill_flagged_todos(settings: Settings, dry_run: bool = False) -> dict[st
 
 
 def repair_flagged_interviews(settings: Settings, dry_run: bool = False) -> dict[str, int]:
-    """重新识别星标面试邮件，修正约面状态并补建已确认面试日程。"""
+    """重新识别星标面试/笔试邮件，修正状态并补建日程。"""
     state = StateStore(settings.database_path)
     stats = {
         "flagged_fetched": 0,
-        "interview_candidates": 0,
+        "calendar_candidates": 0,
         "llm_batches": 0,
         "table_records_updated": 0,
         "todos_created": 0,
@@ -347,11 +366,11 @@ def repair_flagged_interviews(settings: Settings, dry_run: bool = False) -> dict
             cached = state.get_agent_result(message.message_id, settings.deepseek_model)
             subject = message.subject.lower()
             if (
-                (cached and cached.status in INTERVIEW_REVIEW_STATUSES)
-                or any(hint in subject for hint in ("面试", "约面", "预约", "interview"))
+                (cached and cached.status in CALENDAR_REVIEW_STATUSES)
+                or any(hint in subject for hint in ("面试", "约面", "预约", "interview", "笔试", "机考", "考试"))
             ):
                 candidates.append(message)
-        stats["interview_candidates"] = len(candidates)
+        stats["calendar_candidates"] = len(candidates)
 
         agent = DeepSeekMailAgent(settings)
         results: dict[str, Classification] = {}
@@ -399,8 +418,10 @@ def repair_flagged_interviews(settings: Settings, dry_run: bool = False) -> dict
                 current == "约面" or should_replace_status(current, result.status, False)
             ):
                 patch["流程状态"] = result.status
-            if result.status in CALENDAR_STATUSES and result.interview_start:
+            if result.status in HUMAN_INTERVIEW_STATUSES and result.interview_start:
                 patch["截止时间"] = result.interview_start
+            elif result.status == "笔试" and result.deadline:
+                patch["截止时间"] = result.deadline
 
             if patch:
                 table_updates[record_id] = patch

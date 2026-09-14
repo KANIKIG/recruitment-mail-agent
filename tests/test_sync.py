@@ -113,6 +113,64 @@ class StatusPolicyTest(unittest.TestCase):
         self.assertIsNone(_calendar_event_request(message, replace(result, status="约面"), timezone.utc))
         self.assertIsNone(_calendar_event_request(message, replace(result, status="测评&AI面"), timezone.utc))
 
+    def test_fixed_written_exam_uses_exam_window(self):
+        message = MailMessage(
+            uid=1,
+            message_id="m1",
+            subject="统一笔试通知",
+            sender_name="招聘",
+            sender_address="jobs@example.com",
+            received_at=datetime(2026, 9, 5, tzinfo=timezone.utc),
+            body="",
+        )
+        result = Classification(
+            relevant=True,
+            company="示例公司",
+            role="算法工程师",
+            status="笔试",
+            deadline="2099-09-20T19:00:00+08:00",
+            confidence=0.9,
+            reason="固定笔试",
+            source_key="key",
+            written_exam_start="2099-09-20T19:00:00+08:00",
+            written_exam_end="2099-09-20T21:00:00+08:00",
+        )
+
+        event = _calendar_event_request(message, result, timezone.utc)
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event.summary, "笔试｜示例公司｜算法工程师")
+        self.assertEqual(event.start_at, "2099-09-20T11:00+00:00")
+        self.assertEqual(event.end_at, "2099-09-20T13:00+00:00")
+
+    def test_flexible_written_exam_uses_deadline(self):
+        message = MailMessage(
+            uid=1,
+            message_id="m1",
+            subject="在线笔试邀请",
+            sender_name="招聘",
+            sender_address="jobs@example.com",
+            received_at=datetime(2026, 9, 5, tzinfo=timezone.utc),
+            body="请在截止前自行完成",
+        )
+        result = Classification(
+            relevant=True,
+            company="示例公司",
+            role="算法工程师",
+            status="笔试",
+            deadline="2099-09-20T22:00:00+08:00",
+            confidence=0.9,
+            reason="自行完成",
+            source_key="key",
+        )
+
+        event = _calendar_event_request(message, result, timezone.utc)
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event.summary, "笔试截止｜示例公司｜算法工程师")
+        self.assertEqual(event.start_at, "2099-09-20T14:00+00:00")
+        self.assertEqual(event.end_at, "2099-09-20T14:30+00:00")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -74,6 +74,20 @@ class DeepSeekAgentTest(unittest.TestCase):
         self.assertEqual(result.interview_end, "2099-09-20T14:45+08:00")
         self.assertEqual(result.deadline, result.interview_start)
 
+    def test_fixed_written_exam_keeps_exam_window(self):
+        response = {"choices": [{"message": {"content": """{"items":[{"index":0,"is_recruitment":true,"company_name":"示例公司","job_name":"算法工程师","enterprise_type":"民营企业","process_status":"笔试","deadline":"2099-09-20T22:00:00+08:00","written_exam_start":"2099-09-20T19:00:00+08:00","written_exam_end":"2099-09-20T21:00:00+08:00","confidence":0.98,"evidence":"统一笔试时间"}]}"""}}]}
+        result = StubAgent(self.settings(), response).classify_batch([self.message()])["m1"]
+        self.assertEqual(result.written_exam_start, "2099-09-20T19:00+08:00")
+        self.assertEqual(result.written_exam_end, "2099-09-20T21:00+08:00")
+        self.assertEqual(result.deadline, result.written_exam_start)
+
+    def test_flexible_written_exam_uses_only_deadline(self):
+        response = {"choices": [{"message": {"content": """{"items":[{"index":0,"is_recruitment":true,"company_name":"示例公司","job_name":"算法工程师","enterprise_type":"民营企业","process_status":"笔试","deadline":"2099-09-20T22:00:00+08:00","written_exam_start":null,"written_exam_end":"2099-09-20T21:00:00+08:00","confidence":0.98,"evidence":"截止前自行完成"}]}"""}}]}
+        result = StubAgent(self.settings(), response).classify_batch([self.message()])["m1"]
+        self.assertEqual(result.deadline, "2099-09-20T22:00+08:00")
+        self.assertIsNone(result.written_exam_start)
+        self.assertIsNone(result.written_exam_end)
+
     def test_unknown_status_is_downgraded(self):
         response = {"choices": [{"message": {"content": """{"items":[{"index":0,"is_recruitment":true,"company_name":"示例公司","job_name":"算法工程师","process_status":"三面","deadline":null,"confidence":2,"evidence":"通知"}]}"""}}]}
         result = StubAgent(self.settings(), response).classify_batch([self.message()])["m1"]
@@ -85,6 +99,13 @@ class DeepSeekAgentTest(unittest.TestCase):
         response = {"choices": [{"message": {"content": '{"items":[]}'}}]}
         with self.assertRaises(RuntimeError):
             StubAgent(self.settings(), response).classify_batch([self.message()])
+
+    def test_json_code_fence_is_tolerated(self):
+        response = {"choices": [{"message": {"content": """```json
+{"items":[{"index":0,"is_recruitment":true,"company_name":"示例公司","job_name":"算法工程师","process_status":"投递","deadline":null,"confidence":0.9,"evidence":"投递成功"}]}
+```"""}}]}
+        result = StubAgent(self.settings(), response).classify_batch([self.message()])["m1"]
+        self.assertEqual(result.status, "投递")
 
     def test_job_recommendation_is_not_an_application(self):
         response = {"choices": [{"message": {"content": """{"items":[{"index":0,"is_recruitment":true,"company_name":"某公司","job_name":"算法工程师","process_status":"投递","deadline":null,"confidence":0.9,"evidence":"推荐"}]}"""}}]}
