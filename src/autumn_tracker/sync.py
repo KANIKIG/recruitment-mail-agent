@@ -44,7 +44,7 @@ def _record_index(records: list[LarkRecord]) -> tuple[dict[str, LarkRecord], dic
     by_company: dict[str, list[LarkRecord]] = {}
     for record in records:
         key = str(record.fields.get("同步键") or "").strip()
-        company = _cell_text(record.fields.get("公司名称") or record.fields.get("公司")).strip().lower()
+        company = _company_key(_cell_text(record.fields.get("公司名称") or record.fields.get("公司")))
         if key:
             by_key[key] = record
         if company:
@@ -61,13 +61,16 @@ def _find_record(
         return by_key[classification.source_key]
     if classification.company == "待确认公司":
         return None
-    candidates = by_company.get(classification.company.lower(), [])
+    candidates = by_company.get(_company_key(classification.company), [])
     role = classification.role.lower()
     normalized_role = _role_key(role)
     for candidate in candidates:
         existing_role = _cell_text(candidate.fields.get("岗位名称") or candidate.fields.get("岗位")).lower()
         existing_normalized = _role_key(existing_role)
         if existing_role == role or (
+            bool(normalized_role)
+            and normalized_role == existing_normalized
+        ) or (
             min(len(normalized_role), len(existing_normalized)) >= 6
             and (normalized_role in existing_normalized or existing_normalized in normalized_role)
         ):
@@ -82,7 +85,18 @@ def _find_record(
 def _role_key(value: str) -> str:
     value = re.sub(r"(?:2027|27)届(?:校园招聘|校招)?", "", value.lower())
     value = re.sub(r"校招|校园招聘", "", value)
+    # 招聘邮件常在中文岗位后附英文翻译；它不应让同一岗位无法匹配。
+    value = re.sub(r"[（(][^）)]*[a-z][^）)]*[）)]", "", value)
     return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", value)
+
+
+def _company_key(value: str) -> str:
+    value = value.lower().strip()
+    value = re.sub(r"[（(][^）)]*[）)]", "", value)
+    value = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", value)
+    value = re.sub(r"(?:股份有限公司|有限责任公司|集团有限公司|有限公司|股份公司|集团|公司)$", "", value)
+    value = re.sub(r"科技$", "", value)
+    return value
 
 
 def _cell_text(value: Any) -> str:
@@ -195,7 +209,7 @@ def _calendar_event_request(
     if classification.interview_location:
         description.append(f"- 面试地点：{clean(classification.interview_location)}")
     event_key = hashlib.sha256(
-        f"{classification.source_key}|{event_label}|{start.isoformat()}".encode("utf-8")
+        f"{message.message_id}|{event_label}|{start.isoformat()}".encode("utf-8")
     ).hexdigest()[:32]
     return CalendarEventRequest(
         event_key=event_key,
@@ -357,6 +371,8 @@ def repair_flagged_interviews(settings: Settings, dry_run: bool = False) -> dict
         "calendar_eligible": 0,
         "calendar_created": 0,
         "calendar_pending": 0,
+        "unmatched_candidates": 0,
+        "calendar_eligible_unmatched": 0,
     }
     try:
         messages = ImapMailbox(settings).fetch_flagged()
@@ -390,18 +406,28 @@ def repair_flagged_interviews(settings: Settings, dry_run: bool = False) -> dict
         lark = LarkBase(settings.lark_cli, settings.lark_base_token, settings.lark_table_id)
         records = lark.list_records()
         by_key, by_company = _record_index(records)
-        latest_by_record: dict[str, tuple[MailMessage, Classification, LarkRecord]] = {}
+        latest_actions: dict[str, tuple[MailMessage, Classification, LarkRecord | None]] = {}
         for message in candidates:
             result = results[message.message_id]
             if not result.relevant or result.confidence < settings.min_confidence:
                 continue
             record = _find_record(result, by_key, by_company)
-            if record:
-                latest_by_record[record.record_id] = (message, result, record)
+            action_key = (
+                f"record:{record.record_id}"
+                if record
+                else f"unmatched:{_company_key(result.company)}|{_role_key(result.role)}"
+            )
+            latest_actions[action_key] = (message, result, record)
+
+        stats["unmatched_candidates"] = sum(
+            1 for _, _, record in latest_actions.values() if record is None
+        )
 
         table_updates: dict[str, dict[str, Any]] = {}
         timezone = ZoneInfo(settings.timezone)
-        for record_id, (message, result, record) in latest_by_record.items():
+        for message, result, record in latest_actions.values():
+            if record is None:
+                continue
             current = _cell_text(record.fields.get("流程状态")) or "待确认"
             if current in TERMINAL:
                 continue
@@ -424,13 +450,31 @@ def repair_flagged_interviews(settings: Settings, dry_run: bool = False) -> dict
                 patch["截止时间"] = result.deadline
 
             if patch:
-                table_updates[record_id] = patch
+                table_updates[record.record_id] = patch
+
+        # 邮箱待办和日历是邮件识别结果的直接下游，不得依赖飞书表格行匹配。
+        # 表格匹配失败时仍创建可执行提醒，并显式记录告警供后续排查。
+        for message, result, record in latest_actions.values():
+            if record is not None:
+                current = _cell_text(record.fields.get("流程状态")) or "待确认"
+                if current in TERMINAL:
+                    continue
             todo = _todo_request(message, result, timezone)
             if todo and not dry_run:
                 state.enqueue_todo(todo)
             calendar_event = _calendar_event_request(message, result, timezone)
             if calendar_event:
                 stats["calendar_eligible"] += 1
+                if record is None:
+                    stats["calendar_eligible_unmatched"] += 1
+                    print(json.dumps({
+                        "phase": "calendar_repair",
+                        "warning": "table_record_unmatched",
+                        "company": result.company,
+                        "role": result.role,
+                        "subject": message.subject,
+                        "start_at": calendar_event.start_at,
+                    }, ensure_ascii=False), flush=True)
                 if not dry_run:
                     state.enqueue_calendar_event(calendar_event)
 
@@ -542,7 +586,7 @@ def run_sync(
                 if record_id:
                     created = LarkRecord(record_id, fields)
                     by_key[result.source_key] = created
-                    by_company.setdefault(result.company.lower(), []).append(created)
+                    by_company.setdefault(_company_key(result.company), []).append(created)
             synced.append((message, result))
             todo = _todo_request(message, result, timezone)
             if todo:

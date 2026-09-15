@@ -1,6 +1,6 @@
 [project]
 name = "autumn-job-tracker"
-version = "0.5.0"
+version = "0.5.1"
 description = "Classify recruitment emails into Lark Base, Coremail todos, and Lark Calendar"
 requires-python = ">=3.11"
 

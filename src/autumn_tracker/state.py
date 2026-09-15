@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 import json
 from pathlib import Path
+import re
 import sqlite3
 
 from .calendar import CalendarEventRequest
@@ -166,6 +167,35 @@ class StateStore:
             )
 
     def enqueue_calendar_event(self, event: CalendarEventRequest) -> None:
+        existing_rows = self.connection.execute(
+            "SELECT event_key, source_message_id, description, completed_at "
+            "FROM calendar_event WHERE start_at=?",
+            (event.start_at,),
+        ).fetchall()
+        event_link_match = re.search(r"^- 面试入口：(https?://\S+)$", event.description, re.MULTILINE)
+        event_link = event_link_match.group(1) if event_link_match else None
+        for event_key, source_message_id, description, completed_at in existing_rows:
+            existing_link_match = re.search(r"^- 面试入口：(https?://\S+)$", description, re.MULTILINE)
+            existing_link = existing_link_match.group(1) if existing_link_match else None
+            same_source = source_message_id == event.source_message_id
+            same_meeting = bool(event_link and existing_link and event_link == existing_link)
+            if not (same_source or same_meeting):
+                continue
+            if completed_at is None:
+                self.connection.execute(
+                    "UPDATE calendar_event SET source_message_id=?, summary=?, end_at=?, "
+                    "description=?, location=? WHERE event_key=?",
+                    (
+                        event.source_message_id,
+                        event.summary,
+                        event.end_at,
+                        event.description,
+                        event.location,
+                        event_key,
+                    ),
+                )
+                self.connection.commit()
+            return
         self.connection.execute(
             "INSERT INTO calendar_event(event_key, source_message_id, summary, start_at, end_at, description, location) "
             "VALUES(?, ?, ?, ?, ?, ?, ?) ON CONFLICT(event_key) DO UPDATE SET "
