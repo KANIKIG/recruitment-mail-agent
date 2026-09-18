@@ -155,7 +155,7 @@ npm run lark -- auth status
 查看日志：
 
 ```bash
-tail -f logs/watcher.log
+tail -f "$HOME/Library/Logs/RecruitmentMailAgent/watcher.log"
 ```
 
 停止服务：
@@ -164,7 +164,24 @@ tail -f logs/watcher.log
 ./tracker stop
 ```
 
-watcher 与终端会话分离，关闭终端后仍会继续运行。它不注册系统服务，因此电脑重启后需要重新执行 `./tracker start`。
+watcher 与终端会话分离，关闭终端后仍会继续运行；若未安装下面的登录自启，电脑重启后需要重新执行 `./tracker start`。
+
+### macOS 登录自启
+
+安装用户级 LaunchAgent：
+
+```bash
+./tracker install-autostart
+./tracker autostart-status
+```
+
+LaunchAgent 只负责在用户登录后启动项目 watcher，并在 watcher 异常退出时重新拉起；每 5 分钟执行一次的调度仍由项目内部完成。为避开 macOS 对 `Documents` 后台访问的隐私限制，安装器会把运行代码、Node 依赖、权限为 `600` 的本地配置和 SQLite 状态复制到 `~/Library/Application Support/RecruitmentMailAgent`，并让项目目录中的手动命令连接同一份 SQLite。生成的 plist 不包含邮箱账号、密码、DeepSeek Key、飞书 Token 或表格信息。
+
+`./tracker stop` 会停止当前 LaunchAgent，但保留配置，下次登录仍会自动启动。完全关闭并移除登录自启：
+
+```bash
+./tracker uninstall-autostart
+```
 
 ## 清空并重新识别
 

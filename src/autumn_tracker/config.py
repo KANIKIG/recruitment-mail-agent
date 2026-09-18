@@ -77,7 +77,9 @@ class Settings:
             max_messages=int(os.getenv("SYNC_MAX_MESSAGES", "300")),
             min_confidence=float(os.getenv("SYNC_MIN_CONFIDENCE", "0.55")),
             timezone=os.getenv("SYNC_TIMEZONE", "Asia/Shanghai"),
-            database_path=ROOT / "data" / "tracker.sqlite3",
+            database_path=Path(
+                os.getenv("TRACKER_DATABASE_PATH", str(ROOT / "data" / "tracker.sqlite3"))
+            ).expanduser(),
         )
         if require_targets and (not result.lark_base_token or not result.lark_table_id):
             raise ValueError("缺少 LARK_BASE_TOKEN/LARK_TABLE_ID；请先执行 ./tracker init-base")

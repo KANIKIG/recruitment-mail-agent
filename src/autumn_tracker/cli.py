@@ -5,6 +5,7 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import plistlib
 import shutil
 import signal
 import socket
@@ -35,8 +36,11 @@ LEGACY_STATUS_MAP = {
     "已拒绝": "已挂",
     "已暂停": "已挂",
 }
-WATCHER_PID_PATH = ROOT / "data" / "watcher.pid"
-WATCHER_LOG_PATH = ROOT / "logs" / "watcher.log"
+LAUNCH_AGENT_LABEL = "local.recruitment-mail-agent.watcher"
+LAUNCH_AGENT_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCH_AGENT_LABEL}.plist"
+AUTOSTART_RUNTIME_ROOT = Path.home() / "Library" / "Application Support" / "RecruitmentMailAgent"
+WATCHER_PID_PATH = AUTOSTART_RUNTIME_ROOT / "data" / "watcher.pid"
+WATCHER_LOG_PATH = Path.home() / "Library" / "Logs" / "RecruitmentMailAgent" / "watcher.log"
 
 
 def _set_env_values(values: dict[str, str]) -> None:
@@ -402,20 +406,94 @@ def _watcher_is_running(pid: int | None) -> bool:
         return False
 
 
+def _launch_agent_service() -> str:
+    return f"gui/{os.getuid()}/{LAUNCH_AGENT_LABEL}"
+
+
+def _launch_agent_definition(interval: int) -> dict[str, object]:
+    python_bin = os.getenv("TRACKER_PYTHON")
+    if not python_bin:
+        python_bin = "/opt/homebrew/bin/python3" if Path("/opt/homebrew/bin/python3").exists() else sys.executable
+    executable_dirs = [str(Path(python_bin).parent)]
+    node_bin = shutil.which("node")
+    if node_bin:
+        executable_dirs.append(str(Path(node_bin).parent))
+    executable_dirs.extend(["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"])
+    launch_path = ":".join(dict.fromkeys(executable_dirs))
+    return {
+        "Label": LAUNCH_AGENT_LABEL,
+        "ProgramArguments": [
+            python_bin,
+            "-m",
+            "autumn_tracker.cli",
+            "watch",
+            "--interval",
+            str(interval),
+        ],
+        "RunAtLoad": True,
+        "KeepAlive": {"SuccessfulExit": False},
+        "ProcessType": "Background",
+        "ThrottleInterval": 10,
+        "StandardOutPath": str(WATCHER_LOG_PATH),
+        "StandardErrorPath": str(WATCHER_LOG_PATH),
+        "EnvironmentVariables": {
+            "PYTHONUNBUFFERED": "1",
+            "PYTHONPATH": str(AUTOSTART_RUNTIME_ROOT / "src"),
+            "LARK_CLI": str(AUTOSTART_RUNTIME_ROOT / "node_modules" / ".bin" / "lark-cli"),
+            "PATH": launch_path,
+        },
+    }
+
+
+def _launch_agent_loaded() -> bool:
+    completed = subprocess.run(
+        ["launchctl", "print", _launch_agent_service()],
+        capture_output=True,
+        text=True,
+    )
+    return completed.returncode == 0
+
+
+def _bootout_launch_agent() -> None:
+    if _launch_agent_loaded():
+        subprocess.run(
+            ["launchctl", "bootout", _launch_agent_service()],
+            capture_output=True,
+            text=True,
+        )
+
+
+def _stop_watcher_process() -> None:
+    pid = _watcher_pid()
+    if _watcher_is_running(pid) and pid is not None:
+        os.kill(pid, signal.SIGTERM)
+    WATCHER_PID_PATH.unlink(missing_ok=True)
+
+
 def cmd_watch(args: argparse.Namespace) -> int:
     settings = Settings.from_env(require_targets=True)
     interval = args.interval or settings.sync_interval_seconds
     if interval < 60:
         raise ValueError("同步间隔不得少于 60 秒")
+    current_pid = os.getpid()
+    existing = _watcher_pid()
+    if existing != current_pid and _watcher_is_running(existing):
+        raise RuntimeError(f"项目 watcher 已在运行（PID {existing}）")
+    WATCHER_PID_PATH.parent.mkdir(parents=True, exist_ok=True)
+    WATCHER_PID_PATH.write_text(f"{current_pid}\n", encoding="utf-8")
     print(f"项目 watcher 已启动：每 {interval} 秒增量同步一次。", flush=True)
-    while True:
-        started_at = datetime.now().astimezone().isoformat(timespec="seconds")
-        try:
-            stats = run_sync(settings)
-            print(json.dumps({"time": started_at, **stats}, ensure_ascii=False), flush=True)
-        except Exception as exc:
-            print(f"[{started_at}] 同步失败：{exc}", file=sys.stderr, flush=True)
-        time.sleep(interval)
+    try:
+        while True:
+            started_at = datetime.now().astimezone().isoformat(timespec="seconds")
+            try:
+                stats = run_sync(settings)
+                print(json.dumps({"time": started_at, **stats}, ensure_ascii=False), flush=True)
+            except Exception as exc:
+                print(f"[{started_at}] 同步失败：{exc}", file=sys.stderr, flush=True)
+            time.sleep(interval)
+    finally:
+        if _watcher_pid() == current_pid:
+            WATCHER_PID_PATH.unlink(missing_ok=True)
 
 
 def cmd_start(args: argparse.Namespace) -> int:
@@ -457,6 +535,11 @@ def cmd_status(_: argparse.Namespace) -> int:
 
 
 def cmd_stop(_: argparse.Namespace) -> int:
+    if _launch_agent_loaded():
+        _bootout_launch_agent()
+        WATCHER_PID_PATH.unlink(missing_ok=True)
+        print("项目 watcher 已停止；登录自启配置仍保留，下次登录时会再次启动。")
+        return 0
     pid = _watcher_pid()
     if not _watcher_is_running(pid):
         WATCHER_PID_PATH.unlink(missing_ok=True)
@@ -466,6 +549,78 @@ def cmd_stop(_: argparse.Namespace) -> int:
     os.kill(pid, signal.SIGTERM)
     WATCHER_PID_PATH.unlink(missing_ok=True)
     print(f"项目 watcher 已停止（PID {pid}）。")
+    return 0
+
+
+def cmd_install_autostart(args: argparse.Namespace) -> int:
+    if sys.platform != "darwin":
+        raise RuntimeError("install-autostart 当前仅支持 macOS launchd")
+    settings = Settings.from_env(require_targets=True)
+    interval = args.interval or settings.sync_interval_seconds
+    if interval < 60:
+        raise ValueError("同步间隔不得少于 60 秒")
+    _bootout_launch_agent()
+    _stop_watcher_process()
+    runtime_database = AUTOSTART_RUNTIME_ROOT / "data" / "tracker.sqlite3"
+    runtime_database.parent.mkdir(parents=True, exist_ok=True)
+    if settings.database_path.exists() and not runtime_database.exists():
+        shutil.copy2(settings.database_path, runtime_database)
+    _set_env_values({"TRACKER_DATABASE_PATH": str(runtime_database)})
+    AUTOSTART_RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
+    runtime_source = AUTOSTART_RUNTIME_ROOT / "src"
+    runtime_node_modules = AUTOSTART_RUNTIME_ROOT / "node_modules"
+    shutil.rmtree(runtime_source, ignore_errors=True)
+    shutil.rmtree(runtime_node_modules, ignore_errors=True)
+    shutil.copytree(ROOT / "src", runtime_source)
+    shutil.copytree(ROOT / "node_modules", runtime_node_modules, symlinks=True)
+    runtime_env = AUTOSTART_RUNTIME_ROOT / ".env"
+    shutil.copy2(ROOT / ".env", runtime_env)
+    runtime_env.chmod(0o600)
+    LAUNCH_AGENT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    WATCHER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with LAUNCH_AGENT_PATH.open("wb") as handle:
+        plistlib.dump(_launch_agent_definition(interval), handle, sort_keys=True)
+    LAUNCH_AGENT_PATH.chmod(0o644)
+    completed = subprocess.run(
+        ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(LAUNCH_AGENT_PATH)],
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise RuntimeError(f"无法加载登录自启：{detail or 'launchctl bootstrap 失败'}")
+    subprocess.run(
+        ["launchctl", "enable", _launch_agent_service()],
+        capture_output=True,
+        text=True,
+    )
+    print(f"已安装登录自启：{LAUNCH_AGENT_PATH}")
+    print(f"本地运行目录：{AUTOSTART_RUNTIME_ROOT}")
+    print(f"启动日志：{WATCHER_LOG_PATH}")
+    print(f"项目 watcher 每 {interval} 秒运行一次；系统仅负责登录后启动和异常拉起。")
+    return 0
+
+
+def cmd_autostart_status(_: argparse.Namespace) -> int:
+    installed = LAUNCH_AGENT_PATH.exists()
+    loaded = _launch_agent_loaded()
+    pid = _watcher_pid()
+    running = _watcher_is_running(pid)
+    print(json.dumps({
+        "installed": installed,
+        "loaded": loaded,
+        "watcher_running": running,
+        "pid": pid if running else None,
+        "plist": str(LAUNCH_AGENT_PATH),
+    }, ensure_ascii=False, indent=2))
+    return 0 if installed and loaded and running else 1
+
+
+def cmd_uninstall_autostart(_: argparse.Namespace) -> int:
+    _bootout_launch_agent()
+    _stop_watcher_process()
+    LAUNCH_AGENT_PATH.unlink(missing_ok=True)
+    print("已卸载登录自启并停止项目 watcher。")
     return 0
 
 
@@ -519,6 +674,13 @@ def build_parser() -> argparse.ArgumentParser:
     status.set_defaults(handler=cmd_status)
     stop = subparsers.add_parser("stop", help="停止项目 watcher")
     stop.set_defaults(handler=cmd_stop)
+    install_autostart = subparsers.add_parser("install-autostart", help="安装 macOS 登录自启")
+    install_autostart.add_argument("--interval", type=int, default=None, help="同步间隔秒数，默认读取 .env")
+    install_autostart.set_defaults(handler=cmd_install_autostart)
+    autostart_status = subparsers.add_parser("autostart-status", help="查看 macOS 登录自启状态")
+    autostart_status.set_defaults(handler=cmd_autostart_status)
+    uninstall_autostart = subparsers.add_parser("uninstall-autostart", help="卸载 macOS 登录自启")
+    uninstall_autostart.set_defaults(handler=cmd_uninstall_autostart)
     return parser
 
 
