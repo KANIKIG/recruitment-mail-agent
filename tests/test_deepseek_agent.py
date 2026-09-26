@@ -165,6 +165,50 @@ class DeepSeekAgentTest(unittest.TestCase):
         repaired = DeepSeekMailAgent(self.settings()).repair_missing_deadline(message, classification)
         self.assertEqual(repaired.deadline, "2026-09-12T08:00+08:00")
 
+    def test_english_assessment_deadlines_use_earliest_relative_limit(self):
+        message = replace(
+            self.message(),
+            received_at=datetime(2026, 9, 26, 12, 25, tzinfo=timezone.utc),
+            subject="P&G - Invitation to Online Assessment",
+            body=(
+                "Please complete your online assessment within 2 days. "
+                "Please note that the assessment link will expire in 14 days. "
+                "Finish the online assessment by whichever of these dates is earlier."
+            ),
+        )
+        classification = Classification(
+            relevant=True,
+            company="宝洁",
+            role="Product Supply Manager",
+            status="测评&AI面",
+            confidence=0.95,
+            reason="Online assessment invitation",
+            source_key="key",
+        )
+
+        repaired = DeepSeekMailAgent(self.settings()).repair_missing_deadline(message, classification)
+
+        self.assertEqual(repaired.deadline, "2026-09-28T20:25+08:00")
+
+    def test_unrelated_english_response_sla_is_not_a_deadline(self):
+        message = replace(
+            self.message(),
+            body="For questions, customer service usually responds within 1 day.",
+        )
+        classification = Classification(
+            relevant=True,
+            company="示例公司",
+            role="算法工程师",
+            status="测评&AI面",
+            confidence=0.9,
+            reason="Online assessment invitation",
+            source_key="key",
+        )
+
+        repaired = DeepSeekMailAgent(self.settings()).repair_missing_deadline(message, classification)
+
+        self.assertIsNone(repaired.deadline)
+
 
 if __name__ == "__main__":
     unittest.main()
