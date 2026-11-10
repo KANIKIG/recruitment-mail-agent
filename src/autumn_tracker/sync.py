@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from .config import Settings
 from .calendar import CalendarEventRequest, LarkCalendar
 from .coremail import CoremailTodoClient, TodoRequest
-from .deepseek_agent import DeepSeekMailAgent
+from .deepseek_agent import OpenAICompatibleMailAgent
 from .lark import LarkBase, LarkRecord
 from .mailbox import ImapMailbox
 from .models import Classification, MailMessage
@@ -313,7 +313,7 @@ def backfill_flagged_todos(settings: Settings, dry_run: bool = False) -> dict[st
     try:
         messages = ImapMailbox(settings).fetch_flagged()
         stats["flagged_fetched"] = len(messages)
-        agent = DeepSeekMailAgent(settings)
+        agent = OpenAICompatibleMailAgent(settings)
         timezone = ZoneInfo(settings.timezone)
         lark = LarkBase(settings.lark_cli, settings.lark_base_token, settings.lark_table_id)
         records = lark.list_records()
@@ -322,7 +322,7 @@ def backfill_flagged_todos(settings: Settings, dry_run: bool = False) -> dict[st
         needs_agent: list[MailMessage] = []
 
         for message in messages:
-            cached = state.get_agent_result(message.message_id, settings.deepseek_model)
+            cached = state.get_agent_result(message.message_id, settings.llm_cache_key)
             if cached:
                 repaired = agent.repair_missing_deadline(message, cached)
                 results[message.message_id] = repaired
@@ -330,12 +330,12 @@ def backfill_flagged_todos(settings: Settings, dry_run: bool = False) -> dict[st
                 if repaired != cached:
                     stats["deadline_repaired"] += 1
                     if not dry_run:
-                        state.save_agent_result(message.message_id, settings.deepseek_model, repaired)
+                        state.save_agent_result(message.message_id, settings.llm_cache_key, repaired)
             else:
                 needs_agent.append(message)
 
-        for offset in range(0, len(needs_agent), settings.deepseek_batch_size):
-            batch = needs_agent[offset : offset + settings.deepseek_batch_size]
+        for offset in range(0, len(needs_agent), settings.llm_batch_size):
+            batch = needs_agent[offset : offset + settings.llm_batch_size]
             batch_results = agent.classify_batch(batch)
             stats["llm_batches"] += 1
             results.update(batch_results)
@@ -343,7 +343,7 @@ def backfill_flagged_todos(settings: Settings, dry_run: bool = False) -> dict[st
                 for message in batch:
                     state.save_agent_result(
                         message.message_id,
-                        settings.deepseek_model,
+                        settings.llm_cache_key,
                         batch_results[message.message_id],
                     )
 
@@ -395,7 +395,7 @@ def repair_flagged_interviews(settings: Settings, dry_run: bool = False) -> dict
         stats["flagged_fetched"] = len(messages)
         candidates: list[MailMessage] = []
         for message in messages:
-            cached = state.get_agent_result(message.message_id, settings.deepseek_model)
+            cached = state.get_agent_result(message.message_id, settings.llm_cache_key)
             subject = message.subject.lower()
             if (
                 (cached and cached.status in CALENDAR_REVIEW_STATUSES)
@@ -404,10 +404,10 @@ def repair_flagged_interviews(settings: Settings, dry_run: bool = False) -> dict
                 candidates.append(message)
         stats["calendar_candidates"] = len(candidates)
 
-        agent = DeepSeekMailAgent(settings)
+        agent = OpenAICompatibleMailAgent(settings)
         results: dict[str, Classification] = {}
-        for offset in range(0, len(candidates), settings.deepseek_batch_size):
-            batch = candidates[offset : offset + settings.deepseek_batch_size]
+        for offset in range(0, len(candidates), settings.llm_batch_size):
+            batch = candidates[offset : offset + settings.llm_batch_size]
             batch_results = agent.classify_batch(batch)
             stats["llm_batches"] += 1
             results.update(batch_results)
@@ -415,7 +415,7 @@ def repair_flagged_interviews(settings: Settings, dry_run: bool = False) -> dict
                 for message in batch:
                     state.save_agent_result(
                         message.message_id,
-                        settings.deepseek_model,
+                        settings.llm_cache_key,
                         batch_results[message.message_id],
                     )
 
@@ -522,7 +522,7 @@ def run_sync(
         by_key, by_company = _record_index(records)
         messages, max_uid = ImapMailbox(settings).fetch(state.get_last_uid())
         stats["fetched"] = len(messages)
-        agent = DeepSeekMailAgent(settings)
+        agent = OpenAICompatibleMailAgent(settings)
         timezone = ZoneInfo(settings.timezone)
 
         results: dict[str, Classification] = {}
@@ -531,13 +531,13 @@ def run_sync(
         for message in messages:
             if state.was_processed(message.message_id):
                 continue
-            cached = state.get_agent_result(message.message_id, settings.deepseek_model)
+            cached = state.get_agent_result(message.message_id, settings.llm_cache_key)
             if cached:
                 results[message.message_id] = cached
             else:
                 needs_agent.append(message)
-        for offset in range(0, len(needs_agent), settings.deepseek_batch_size):
-            batch = needs_agent[offset : offset + settings.deepseek_batch_size]
+        for offset in range(0, len(needs_agent), settings.llm_batch_size):
+            batch = needs_agent[offset : offset + settings.llm_batch_size]
             batch_results = agent.classify_batch(batch)
             stats["llm_batches"] += 1
             print(json.dumps({
@@ -548,7 +548,7 @@ def run_sync(
             results.update(batch_results)
             if not dry_run:
                 for message in batch:
-                    state.save_agent_result(message.message_id, settings.deepseek_model, batch_results[message.message_id])
+                    state.save_agent_result(message.message_id, settings.llm_cache_key, batch_results[message.message_id])
 
         for message in messages:
             if state.was_processed(message.message_id):

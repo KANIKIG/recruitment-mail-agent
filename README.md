@@ -1,6 +1,6 @@
 # Recruitment Mail Agent
 
-一个小型招聘流程 Agent：增量读取 IMAP 邮箱中的招聘邮件，使用 DeepSeek 提取公司、岗位、企业类型、流程状态和关键时间，再同步到飞书多维表格。
+一个小型招聘流程 Agent：增量读取 IMAP 邮箱中的招聘邮件，使用任意 OpenAI-compatible Chat Completions 模型提取公司、岗位、企业类型、流程状态和关键时间，再同步到飞书多维表格。
 
 ## 功能
 
@@ -23,7 +23,7 @@
 ```text
 IMAP（BODY.PEEK）
   → UID / Message-ID 去重
-  → DeepSeek JSON 结构化抽取
+  → OpenAI-compatible API JSON 结构化抽取
   → 状态、时间和字段白名单校验
   → 飞书多维表格 upsert
   → SQLite 保存游标与结果缓存
@@ -38,7 +38,7 @@ IMAP（BODY.PEEK）
 
 - Python 3.11+
 - Node.js 16+
-- 可访问 IMAP、DeepSeek API 和飞书开放平台
+- 可访问 IMAP、一个 OpenAI-compatible Chat Completions API 和飞书开放平台
 - 支持客户端密码或应用专用密码的邮箱账户
 
 ## 快速启动
@@ -65,10 +65,14 @@ COREMAIL_TODO_ENABLED=true
 COREMAIL_WEB_URL=https://mail.example.com
 COREMAIL_LOOKUP_LIMIT=200
 
-DEEPSEEK_API_KEY=your_deepseek_api_key
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-v4-flash
-DEEPSEEK_BATCH_SIZE=3
+LLM_API_KEY=your_llm_api_key
+LLM_BASE_URL=https://api.deepseek.com
+LLM_MODEL=deepseek-v4-flash
+LLM_BATCH_SIZE=3
+LLM_JSON_MODE=true
+LLM_SYSTEM_ROLE=system
+LLM_MAX_TOKENS_PARAM=max_tokens
+LLM_TIMEOUT_SECONDS=90
 
 LARK_BASE_TOKEN=
 LARK_TABLE_ID=
@@ -81,6 +85,16 @@ SYNC_MAX_MESSAGES=300
 SYNC_MIN_CONFIDENCE=0.55
 SYNC_TIMEZONE=Asia/Shanghai
 ```
+
+模型接口的最小要求是支持 `POST /chat/completions`、Bearer API Key，并返回 `choices[0].message.content`。常用配置：
+
+- OpenAI、DeepSeek、硅基流动、OpenRouter 或自建 vLLM 等服务：填写 `LLM_API_KEY`、`LLM_BASE_URL` 和 `LLM_MODEL`。
+- 如果供应商给的是完整接口地址，使用 `LLM_CHAT_COMPLETIONS_URL`，项目不会再自动拼接 `/chat/completions`。
+- 不支持 JSON mode 的模型设置 `LLM_JSON_MODE=false`；Agent 仍会通过提示词要求 JSON，并兼容 Markdown JSON 代码块。
+- 需要 `developer` 角色的模型设置 `LLM_SYSTEM_ROLE=developer`。
+- 要求 `max_completion_tokens` 的模型设置 `LLM_MAX_TOKENS_PARAM=max_completion_tokens`。
+- 供应商专属参数与请求头可分别写入 `LLM_EXTRA_BODY_JSON`、`LLM_EXTRA_HEADERS_JSON`。DeepSeek 官方地址会自动沿用旧版的 `thinking: disabled` 行为。
+- `OPENAI_API_KEY/OPENAI_BASE_URL/OPENAI_MODEL` 和旧版 `DEEPSEEK_*` 变量仍兼容；若同时存在，`LLM_*` 优先。
 
 `SYNC_SINCE_DATE` 是首次建游标时允许读取的最早日期。建好游标后，程序只处理 UID 更大的新邮件。
 
@@ -175,7 +189,7 @@ watcher 与终端会话分离，关闭终端后仍会继续运行；若未安装
 ./tracker autostart-status
 ```
 
-LaunchAgent 只负责在用户登录后启动项目 watcher，并在 watcher 异常退出时重新拉起；每 5 分钟执行一次的调度仍由项目内部完成。为避开 macOS 对 `Documents` 后台访问的隐私限制，安装器会把运行代码、Node 依赖、权限为 `600` 的本地配置和 SQLite 状态复制到 `~/Library/Application Support/RecruitmentMailAgent`，并让项目目录中的手动命令连接同一份 SQLite。生成的 plist 不包含邮箱账号、密码、DeepSeek Key、飞书 Token 或表格信息。
+LaunchAgent 只负责在用户登录后启动项目 watcher，并在 watcher 异常退出时重新拉起；每 5 分钟执行一次的调度仍由项目内部完成。为避开 macOS 对 `Documents` 后台访问的隐私限制，安装器会把运行代码、Node 依赖、权限为 `600` 的本地配置和 SQLite 状态复制到 `~/Library/Application Support/RecruitmentMailAgent`，并让项目目录中的手动命令连接同一份 SQLite。生成的 plist 不包含邮箱账号、密码、LLM API Key、飞书 Token 或表格信息。
 
 `./tracker stop` 会停止当前 LaunchAgent，但保留配置，下次登录仍会自动启动。完全关闭并移除登录自启：
 
@@ -200,7 +214,7 @@ LaunchAgent 只负责在用户登录后启动项目 watcher，并在 watcher 异
 - `.env`、SQLite、PID、日志、临时文件和依赖目录都在 `.gitignore` 中。
 - Coremail Web 会话仅保存在单次同步进程的内存中；账号、密码和会话 ID 不写入日志或数据库。
 - IMAP 拉取使用 `BODY.PEEK[]`，不会因为读取正文而将邮件设为已读。
-- 邮件主题、发件人、时间和正文前 4,000 字符会发送到配置的 DeepSeek API。
+- 邮件主题、发件人、时间和正文前 4,000 字符会发送到你配置的 OpenAI-compatible API。
 - 飞书只保存七个业务字段；Message-ID、LLM 缓存和 IMAP 游标保存在本地。
 - 邮件正文按不可信输入处理；提示词禁止执行邮件中的指令、链接、代码或工具请求。
 - 不要提交 `.env`，也不要在 Issue、日志或截图中公开邮箱密码、API Key、Base Token 和 Table ID。

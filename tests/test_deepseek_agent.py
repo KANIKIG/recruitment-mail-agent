@@ -1,13 +1,14 @@
 from dataclasses import replace
 from datetime import datetime, timezone
 import unittest
+from unittest.mock import patch
 
 from autumn_tracker.config import Settings
-from autumn_tracker.deepseek_agent import DeepSeekMailAgent
+from autumn_tracker.deepseek_agent import OpenAICompatibleMailAgent
 from autumn_tracker.models import Classification, MailMessage
 
 
-class StubAgent(DeepSeekMailAgent):
+class StubAgent(OpenAICompatibleMailAgent):
     def __init__(self, settings: Settings, response: dict):
         super().__init__(settings)
         self.response = response
@@ -17,11 +18,22 @@ class StubAgent(DeepSeekMailAgent):
         return self.response
 
 
-class DeepSeekAgentTest(unittest.TestCase):
+class FakeHttpResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read(self):
+        return b'{"choices":[]}'
+
+
+class OpenAICompatibleAgentTest(unittest.TestCase):
     def settings(self) -> Settings:
         return replace(
             Settings.from_env(require_targets=False, require_mail=False),
-            deepseek_api_key="test-key",
+            llm_api_key="test-key",
         )
 
     def message(self) -> MailMessage:
@@ -42,6 +54,49 @@ class DeepSeekAgentTest(unittest.TestCase):
         self.assertEqual(result.status, "测评&AI面")
         self.assertEqual(result.deadline, "2026-09-08T18:00+08:00")
         self.assertEqual(result.company_type, "央国企")
+
+    def test_generic_provider_payload_has_no_deepseek_only_fields(self):
+        response = {"choices": [{"message": {"content": """{"items":[{"index":0,"is_recruitment":true,"company_name":"示例公司","job_name":"算法工程师","process_status":"投递","deadline":null,"confidence":0.9,"evidence":"申请成功"}]}"""}}]}
+        settings = replace(
+            self.settings(),
+            llm_base_url="https://llm.example.com/v1",
+            llm_chat_completions_url=None,
+            llm_extra_body={},
+            llm_json_mode=False,
+            llm_system_role="developer",
+            llm_max_tokens_param="max_completion_tokens",
+        )
+        agent = StubAgent(settings, response)
+
+        agent.classify_batch([self.message()])
+
+        self.assertEqual(agent.payload["model"], settings.llm_model)
+        self.assertEqual(agent.payload["messages"][0]["role"], "developer")
+        self.assertIn("max_completion_tokens", agent.payload)
+        self.assertNotIn("max_tokens", agent.payload)
+        self.assertNotIn("response_format", agent.payload)
+        self.assertNotIn("thinking", agent.payload)
+
+    def test_request_uses_configured_openai_compatible_endpoint_and_headers(self):
+        settings = replace(
+            self.settings(),
+            llm_api_key="provider-key",
+            llm_base_url="https://llm.example.com/v1",
+            llm_chat_completions_url="https://proxy.example.com/custom/chat/completions",
+            llm_extra_headers={"X-Provider": "example"},
+            llm_timeout_seconds=45,
+        )
+        agent = OpenAICompatibleMailAgent(settings)
+
+        with patch("autumn_tracker.deepseek_agent.urlopen", return_value=FakeHttpResponse()) as mocked:
+            agent._request({"model": "provider-model", "messages": []})
+
+        request = mocked.call_args.args[0]
+        self.assertEqual(request.full_url, "https://proxy.example.com/custom/chat/completions")
+        headers = {key.lower(): value for key, value in request.header_items()}
+        self.assertEqual(headers["authorization"], "Bearer provider-key")
+        self.assertEqual(headers["x-provider"], "example")
+        self.assertEqual(mocked.call_args.kwargs["timeout"], 45)
 
     def test_company_type_batch_is_strict(self):
         response = {"choices": [{"message": {"content": """{"items":[{"index":0,"enterprise_type":"民营企业"},{"index":1,"enterprise_type":"外企"}]}"""}}]}
@@ -179,7 +234,7 @@ class DeepSeekAgentTest(unittest.TestCase):
             reason="测评邀请",
             source_key="key",
         )
-        repaired = DeepSeekMailAgent(self.settings()).repair_missing_deadline(message, classification)
+        repaired = OpenAICompatibleMailAgent(self.settings()).repair_missing_deadline(message, classification)
         self.assertEqual(repaired.deadline, "2026-09-08T08:00+08:00")
 
     def test_link_validity_days_are_repaired(self):
@@ -194,7 +249,7 @@ class DeepSeekAgentTest(unittest.TestCase):
             reason="AI 面试邀请",
             source_key="key",
         )
-        repaired = DeepSeekMailAgent(self.settings()).repair_missing_deadline(message, classification)
+        repaired = OpenAICompatibleMailAgent(self.settings()).repair_missing_deadline(message, classification)
         self.assertEqual(repaired.deadline, "2026-09-12T08:00+08:00")
 
     def test_english_assessment_deadlines_use_earliest_relative_limit(self):
@@ -218,7 +273,7 @@ class DeepSeekAgentTest(unittest.TestCase):
             source_key="key",
         )
 
-        repaired = DeepSeekMailAgent(self.settings()).repair_missing_deadline(message, classification)
+        repaired = OpenAICompatibleMailAgent(self.settings()).repair_missing_deadline(message, classification)
 
         self.assertEqual(repaired.deadline, "2026-09-28T20:25+08:00")
 
@@ -237,7 +292,7 @@ class DeepSeekAgentTest(unittest.TestCase):
             source_key="key",
         )
 
-        repaired = DeepSeekMailAgent(self.settings()).repair_missing_deadline(message, classification)
+        repaired = OpenAICompatibleMailAgent(self.settings()).repair_missing_deadline(message, classification)
 
         self.assertIsNone(repaired.deadline)
 

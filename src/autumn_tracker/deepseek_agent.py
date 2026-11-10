@@ -99,12 +99,24 @@ def _source_key(company: str, role: str, address: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
 
 
-class DeepSeekMailAgent:
+class OpenAICompatibleMailAgent:
     def __init__(self, settings: Settings):
-        if not settings.deepseek_api_key:
-            raise ValueError("缺少 DEEPSEEK_API_KEY")
+        if not settings.llm_api_key:
+            raise ValueError("缺少 LLM_API_KEY（也兼容 OPENAI_API_KEY/DEEPSEEK_API_KEY）")
         self.settings = settings
         self.timezone = ZoneInfo(settings.timezone)
+
+    def _chat_payload(self, messages: list[dict[str, str]], max_tokens: int) -> dict[str, Any]:
+        payload: dict[str, Any] = dict(self.settings.llm_extra_body)
+        payload.update({
+            "model": self.settings.llm_model,
+            "messages": messages,
+            self.settings.llm_max_tokens_param: max_tokens,
+            "stream": False,
+        })
+        if self.settings.llm_json_mode and "response_format" not in payload:
+            payload["response_format"] = {"type": "json_object"}
+        return payload
 
     def classify_batch(self, messages: list[MailMessage]) -> dict[str, Classification]:
         envelope = {
@@ -121,17 +133,13 @@ class DeepSeekMailAgent:
                 for index, message in enumerate(messages)
             ],
         }
-        payload = {
-            "model": self.settings.deepseek_model,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+        payload = self._chat_payload(
+            [
+                {"role": self.settings.llm_system_role, "content": SYSTEM_PROMPT},
                 {"role": "user", "content": "请把以下邮件数据抽取为 JSON：\n" + json.dumps(envelope, ensure_ascii=False)},
             ],
-            "thinking": {"type": "disabled"},
-            "response_format": {"type": "json_object"},
-            "max_tokens": max(2000, len(messages) * 500),
-            "stream": False,
-        }
+            max(2000, len(messages) * 500),
+        )
         by_index: dict[int, dict[str, Any]] = {}
         last_error: Exception | None = None
         for _ in range(3):
@@ -152,7 +160,7 @@ class DeepSeekMailAgent:
             except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
                 last_error = exc
         else:
-            raise RuntimeError("DeepSeek 连续 3 次未返回完整的结构化 JSON") from last_error
+            raise RuntimeError("LLM 连续 3 次未返回完整的结构化 JSON") from last_error
 
         results: dict[str, Classification] = {}
         for index, message in enumerate(messages):
@@ -253,10 +261,9 @@ class DeepSeekMailAgent:
         unique_companies = list(dict.fromkeys(company.strip() for company in companies if company.strip()))
         if not unique_companies:
             return {}
-        payload = {
-            "model": self.settings.deepseek_model,
-            "messages": [
-                {"role": "system", "content": COMPANY_TYPE_SYSTEM_PROMPT},
+        payload = self._chat_payload(
+            [
+                {"role": self.settings.llm_system_role, "content": COMPANY_TYPE_SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": "请分类以下招聘主体：\n" + json.dumps(
@@ -265,24 +272,21 @@ class DeepSeekMailAgent:
                     ),
                 },
             ],
-            "thinking": {"type": "disabled"},
-            "response_format": {"type": "json_object"},
-            "max_tokens": max(800, len(unique_companies) * 40),
-            "stream": False,
-        }
+            max(800, len(unique_companies) * 40),
+        )
         response = self._request(payload)
         try:
             content = response["choices"][0]["message"]["content"]
             items = json.loads(content)["items"]
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-            raise RuntimeError("DeepSeek 未返回预期的企业类型 JSON") from exc
+            raise RuntimeError("LLM 未返回预期的企业类型 JSON") from exc
         by_index = {
             item.get("index"): item.get("enterprise_type")
             for item in items if isinstance(item, dict) and isinstance(item.get("index"), int)
         }
         expected = set(range(len(unique_companies)))
         if set(by_index) != expected or any(value not in ALLOWED_COMPANY_TYPES for value in by_index.values()):
-            raise RuntimeError("DeepSeek 返回的企业类型不完整或不在允许选项中")
+            raise RuntimeError("LLM 返回的企业类型不完整或不在允许选项中")
         return {name: str(by_index[index]) for index, name in enumerate(unique_companies)}
 
     @staticmethod
@@ -314,26 +318,31 @@ class DeepSeekMailAgent:
     def _request(self, payload: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = Request(
-            self.settings.deepseek_base_url + "/chat/completions",
+            self.settings.llm_endpoint,
             data=body,
             method="POST",
             headers={
-                "Authorization": f"Bearer {self.settings.deepseek_api_key}",
+                "Authorization": f"Bearer {self.settings.llm_api_key}",
                 "Content-Type": "application/json",
+                **self.settings.llm_extra_headers,
             },
         )
         last_error: Exception | None = None
         for attempt in range(3):
             try:
-                with urlopen(request, timeout=90) as response:
+                with urlopen(request, timeout=self.settings.llm_timeout_seconds) as response:
                     return json.loads(response.read().decode("utf-8"))
             except HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")[:500]
-                last_error = RuntimeError(f"DeepSeek API HTTP {exc.code}: {detail}")
+                last_error = RuntimeError(f"OpenAI-compatible API HTTP {exc.code}: {detail}")
                 if exc.code < 500 and exc.code != 429:
                     break
             except (URLError, TimeoutError, json.JSONDecodeError) as exc:
                 last_error = exc
             if attempt < 2:
                 time.sleep(1.5 * (attempt + 1))
-        raise RuntimeError(f"DeepSeek API 调用失败：{last_error}")
+        raise RuntimeError(f"OpenAI-compatible API 调用失败：{last_error}")
+
+
+# 保留旧导入名称，避免现有外部脚本在升级后立即失效。
+DeepSeekMailAgent = OpenAICompatibleMailAgent

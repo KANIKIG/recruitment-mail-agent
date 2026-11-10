@@ -260,7 +260,7 @@ class StatusPolicyTest(unittest.TestCase):
                 Settings.from_env(require_targets=False, require_mail=False),
                 email="user@example.com",
                 password_value="test-password",
-                deepseek_api_key="test-key",
+                llm_api_key="test-key",
                 lark_base_token="test-base",
                 lark_table_id="test-table",
                 lark_calendar_enabled=True,
@@ -275,7 +275,7 @@ class StatusPolicyTest(unittest.TestCase):
 
             with (
                 patch("autumn_tracker.sync.ImapMailbox") as mailbox_class,
-                patch("autumn_tracker.sync.DeepSeekMailAgent") as agent_class,
+                patch("autumn_tracker.sync.OpenAICompatibleMailAgent") as agent_class,
                 patch("autumn_tracker.sync.LarkBase") as lark_class,
                 patch("autumn_tracker.sync.print"),
                 patch("autumn_tracker.sync._sync_pending_todos", return_value=(0, 0)),

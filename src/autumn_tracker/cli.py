@@ -16,7 +16,7 @@ import time
 from .config import ROOT, Settings, load_dotenv
 from .calendar import LarkCalendar
 from .coremail import CoremailTodoClient
-from .deepseek_agent import DeepSeekMailAgent
+from .deepseek_agent import OpenAICompatibleMailAgent
 from .lark import ENTERPRISE_TYPE_OPTIONS, FIELD_ORDER, LarkBase, STATUS_OPTIONS
 from .mailbox import ImapMailbox
 from .state import StateStore
@@ -196,7 +196,7 @@ def cmd_backfill_company_types(_: argparse.Namespace) -> int:
             pending.append((record.record_id, company))
 
     companies = list(dict.fromkeys(company for _, company in pending))
-    company_types = DeepSeekMailAgent(settings).classify_company_types(companies)
+    company_types = OpenAICompatibleMailAgent(settings).classify_company_types(companies)
     updates = {
         record_id: {"企业类型": company_types[company]}
         for record_id, company in pending
@@ -265,11 +265,11 @@ def cmd_doctor(_: argparse.Namespace) -> int:
             except Exception as exc:
                 print(f"[FAIL] Coremail 原生截止待办：{exc}")
                 problems.append("检查 COREMAIL_WEB_URL，且确认该密码也可登录网页邮箱")
-    if settings.deepseek_api_key:
-        print(f"[OK] DeepSeek Agent：{settings.deepseek_model}")
+    if settings.llm_api_key:
+        print(f"[OK] OpenAI-compatible Agent：{settings.llm_model}")
     else:
-        print("[FAIL] DeepSeek Agent：缺少 DEEPSEEK_API_KEY")
-        problems.append("在 .env 中填写 DEEPSEEK_API_KEY")
+        print("[FAIL] OpenAI-compatible Agent：缺少 LLM_API_KEY")
+        problems.append("在 .env 中填写 LLM_API_KEY（或兼容的 OPENAI_API_KEY/DEEPSEEK_API_KEY）")
     if cli_exists:
         completed = subprocess.run([str(cli_path), "auth", "status"], capture_output=True, text=True)
         print(f"[{'OK' if completed.returncode == 0 else 'FAIL'}] 飞书授权")

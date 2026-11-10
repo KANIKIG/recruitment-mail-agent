@@ -26,6 +26,8 @@ class LaunchAgentTest(unittest.TestCase):
         serialized = repr(definition)
         self.assertNotIn("IMAP_PASSWORD", serialized)
         self.assertNotIn("DEEPSEEK_API_KEY", serialized)
+        self.assertNotIn("LLM_API_KEY", serialized)
+        self.assertNotIn("OPENAI_API_KEY", serialized)
 
 
 if __name__ == "__main__":
