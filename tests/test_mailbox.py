@@ -31,6 +31,21 @@ class FakeIMAP:
         self.calls.append(("logout",))
 
 
+class FakeBatchIMAP(FakeIMAP):
+    def uid(self, *args):
+        self.calls.append(("uid", *args))
+        if args[0] == "search":
+            return "OK", [b"7 9"]
+        if args[0] == "fetch":
+            first = b"From: A <a@example.com>\nDate: Sun, 20 Sep 2026 10:00:00 +0800\nSubject: First\nMessage-ID: <m7>\n\nBody one"
+            second = b"From: B <b@example.com>\nDate: Sun, 20 Sep 2026 11:00:00 +0800\nSubject: Second\nMessage-ID: <m9>\n\nBody two"
+            return "OK", [
+                (b"1 (UID 7 BODY[] {123}", first), b")",
+                (b"2 (UID 9 BODY[] {123}", second), b")",
+            ]
+        return "OK", [b""]
+
+
 class MailboxFlagTest(unittest.TestCase):
     def settings(self) -> Settings:
         return replace(
@@ -64,6 +79,18 @@ class MailboxFlagTest(unittest.TestCase):
             ("uid", "search", None, "(FLAGGED SINCE 20-Aug-2026)"),
             FakeIMAP.instances[0].calls,
         )
+
+    @patch("autumn_tracker.mailbox.imaplib.IMAP4_SSL", FakeBatchIMAP)
+    def test_fetches_multiple_messages_in_one_imap_command(self):
+        FakeBatchIMAP.instances.clear()
+
+        messages, max_uid = ImapMailbox(self.settings()).fetch()
+
+        self.assertEqual([message.uid for message in messages], [7, 9])
+        self.assertEqual([message.subject for message in messages], ["First", "Second"])
+        self.assertEqual(max_uid, 9)
+        fetch_calls = [call for call in FakeBatchIMAP.instances[0].calls if call[:2] == ("uid", "fetch")]
+        self.assertEqual(fetch_calls, [("uid", "fetch", "7,9", "(UID BODY.PEEK[])")])
 
     def test_html_and_calendar_preserve_invite_time_and_real_link(self):
         raw = b"""MIME-Version: 1.0

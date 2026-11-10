@@ -121,6 +121,38 @@ class DeepSeekAgentTest(unittest.TestCase):
         result = StubAgent(self.settings(), response).classify_batch([message])["m2"]
         self.assertFalse(result.relevant)
 
+    def test_campus_recruitment_webinar_is_not_an_application(self):
+        response = {"choices": [{"message": {"content": """{"items":[{"index":0,"is_recruitment":true,"company_name":"示例银行","job_name":"待确认岗位","process_status":"投递","deadline":null,"confidence":0.9,"evidence":"校园招聘"}]}"""}}]}
+        message = MailMessage(
+            4,
+            "m4",
+            "【空宣邀请函】示例银行校园招聘",
+            "招聘系统",
+            "notice@example.com",
+            datetime(2026, 9, 5, tzinfo=timezone.utc),
+            "欢迎参加线上宣讲会。",
+        )
+
+        result = StubAgent(self.settings(), response).classify_batch([message])["m4"]
+
+        self.assertFalse(result.relevant)
+
+    def test_interview_satisfaction_survey_is_not_a_new_process_event(self):
+        response = {"choices": [{"message": {"content": """{"items":[{"index":0,"is_recruitment":true,"company_name":"示例公司","job_name":"待确认岗位","process_status":"技术面","deadline":null,"confidence":0.9,"evidence":"面试后问卷"}]}"""}}]}
+        message = MailMessage(
+            5,
+            "m5",
+            "示例公司面试满意度问卷",
+            "招聘系统",
+            "notice@example.com",
+            datetime(2026, 9, 5, tzinfo=timezone.utc),
+            "感谢参加面试，请评价面试体验。",
+        )
+
+        result = StubAgent(self.settings(), response).classify_batch([message])["m5"]
+
+        self.assertFalse(result.relevant)
+
     def test_submission_failure_is_not_a_rejection(self):
         response = {"choices": [{"message": {"content": """{"items":[{"index":0,"is_recruitment":true,"company_name":"滴滴","job_name":"校园大使","process_status":"已挂","deadline":null,"confidence":0.9,"evidence":"投递失败"}]}"""}}]}
         message = MailMessage(

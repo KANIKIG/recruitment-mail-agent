@@ -14,6 +14,9 @@ from .config import Settings
 from .models import MailMessage
 
 
+IMAP_FETCH_BATCH_SIZE = 50
+
+
 def _decode(value: str | None) -> str:
     if not value:
         return ""
@@ -135,30 +138,47 @@ class ImapMailbox:
             uids = uids[: self.settings.max_messages]
             messages: list[MailMessage] = []
             max_seen = after_uid
-            for uid in uids:
-                status, payload = client.uid("fetch", str(uid), "(BODY.PEEK[])")
-                if status != "OK" or not payload or not isinstance(payload[0], tuple):
-                    continue
-                parsed = BytesParser(policy=policy.default).parsebytes(payload[0][1])
-                sender_name, sender_address = parseaddr(_decode(parsed.get("From")))
-                try:
-                    received_at = parsedate_to_datetime(parsed.get("Date"))
-                    if received_at.tzinfo is None:
-                        received_at = received_at.replace(tzinfo=timezone.utc)
-                except (TypeError, ValueError, OverflowError):
-                    received_at = datetime.now(timezone.utc)
-                parsed_message = MailMessage(
-                    uid=uid,
-                    message_id=str(parsed.get("Message-ID") or f"imap:{uid}"),
-                    subject=_decode(parsed.get("Subject")),
-                    sender_name=_decode(sender_name),
-                    sender_address=sender_address.lower(),
-                    received_at=received_at,
-                    body=_message_body(parsed),
-                )
-                if parsed_message.received_at.astimezone(since.tzinfo) >= since:
-                    messages.append(parsed_message)
-                max_seen = max(uid, max_seen or 0)
+            for offset in range(0, len(uids), IMAP_FETCH_BATCH_SIZE):
+                requested = uids[offset : offset + IMAP_FETCH_BATCH_SIZE]
+                uid_set = ",".join(str(uid) for uid in requested)
+                status, payload = client.uid("fetch", uid_set, "(UID BODY.PEEK[])")
+                if status != "OK":
+                    raise RuntimeError(f"IMAP 批量读取失败：UID {requested[0]}–{requested[-1]}")
+                raw_by_uid: dict[int, bytes] = {}
+                for item in payload or []:
+                    if not isinstance(item, tuple) or len(item) < 2:
+                        continue
+                    metadata, raw = item[0], item[1]
+                    if not isinstance(metadata, bytes) or not isinstance(raw, bytes):
+                        continue
+                    match = re.search(rb"\bUID\s+(\d+)\b", metadata)
+                    if match:
+                        raw_by_uid[int(match.group(1))] = raw
+                for uid in requested:
+                    raw = raw_by_uid.get(uid)
+                    if raw is None:
+                        continue
+                    parsed = BytesParser(policy=policy.default).parsebytes(raw)
+                    sender_name, sender_address = parseaddr(_decode(parsed.get("From")))
+                    try:
+                        received_at = parsedate_to_datetime(parsed.get("Date"))
+                        if received_at.tzinfo is None:
+                            received_at = received_at.replace(tzinfo=timezone.utc)
+                    except (TypeError, ValueError, OverflowError):
+                        received_at = datetime.now(timezone.utc)
+                    parsed_message = MailMessage(
+                        uid=uid,
+                        message_id=str(parsed.get("Message-ID") or f"imap:{uid}"),
+                        subject=_decode(parsed.get("Subject")),
+                        sender_name=_decode(sender_name),
+                        sender_address=sender_address.lower(),
+                        received_at=received_at,
+                        body=_message_body(parsed),
+                    )
+                    if parsed_message.received_at.astimezone(since.tzinfo) >= since:
+                        messages.append(parsed_message)
+                if requested:
+                    max_seen = max(requested[-1], max_seen or 0)
             return messages, max_seen
         finally:
             try:

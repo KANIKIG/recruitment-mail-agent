@@ -107,6 +107,22 @@ def _cell_text(value: Any) -> str:
     return str(value or "")
 
 
+def _is_newer_timestamp(incoming: str, current_value: Any) -> bool:
+    current = _cell_text(current_value).strip()
+    if not current:
+        return True
+    try:
+        incoming_at = datetime.fromisoformat(incoming.replace("Z", "+00:00"))
+        current_at = datetime.fromisoformat(current.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if incoming_at.tzinfo is None and current_at.tzinfo is not None:
+        incoming_at = incoming_at.replace(tzinfo=current_at.tzinfo)
+    elif current_at.tzinfo is None and incoming_at.tzinfo is not None:
+        current_at = current_at.replace(tzinfo=incoming_at.tzinfo)
+    return incoming_at > current_at
+
+
 def _fields(message: MailMessage, classification: Classification, tz: ZoneInfo) -> dict[str, Any]:
     received = message.received_at.astimezone(tz).isoformat(timespec="seconds")
     fields: dict[str, Any] = {
@@ -562,6 +578,8 @@ def run_sync(
                     fields.pop("流程状态", None)
                 if record.fields.get("投递时间") or result.status != "投递":
                     fields.pop("投递时间", None)
+                if not _is_newer_timestamp(fields["更新时间"], record.fields.get("更新时间")):
+                    fields.pop("更新时间", None)
 
             print(json.dumps({
                 "action": action,

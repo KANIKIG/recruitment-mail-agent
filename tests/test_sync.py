@@ -13,6 +13,7 @@ from autumn_tracker.sync import (
     _company_key,
     _fields,
     _find_record,
+    _is_newer_timestamp,
     _record_index,
     _role_key,
     _todo_request,
@@ -22,6 +23,16 @@ from autumn_tracker.sync import (
 
 
 class StatusPolicyTest(unittest.TestCase):
+    def test_historical_replay_does_not_regress_update_time(self):
+        self.assertFalse(_is_newer_timestamp(
+            "2026-09-20T10:00:00+08:00",
+            "2026-10-22T10:00:00.000+08:00",
+        ))
+        self.assertTrue(_is_newer_timestamp(
+            "2026-10-23T10:00:00+08:00",
+            "2026-10-22T10:00:00.000+08:00",
+        ))
+
     def test_never_regress(self):
         self.assertFalse(should_replace_status("技术面", "投递", False))
 
